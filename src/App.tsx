@@ -5,11 +5,60 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence, useAnimation } from 'motion/react';
-import { Monitor, Trash2, Folder, HardDrive, Chrome, X, Minimize2, Square, Link, Info, User, Shield, Swords, Zap, Activity, Lock, Pencil } from 'lucide-react';
+import { Monitor, Trash2, Folder, HardDrive, Chrome, X, Minimize2, Maximize, Minimize, Square, Link, Info, User, Shield, Swords, Zap, Activity, Lock, Pencil, LogIn, LogOut } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
+import { auth, db, googleProvider, doc, getDoc, setDoc, updateDoc, onSnapshot, signInWithPopup } from './firebase';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 // Custom Mouse Cursor SVG with Click Effect
-const CustomCursorIcon = ({ color = 'white', isClicked = false, mode = 'pointer', chargeProgress = 0 }: { color?: string, isClicked?: boolean, mode?: string, chargeProgress?: number }) => {
+const CustomCursorIcon = ({ color = 'white', isClicked = false, mode = 'pointer', chargeProgress = 0, isLassoActive = false, lassoAngle = 0 }: { color?: string, isClicked?: boolean, mode?: string, chargeProgress?: number, isLassoActive?: boolean, lassoAngle?: number }) => {
   const getIcon = () => {
     switch(mode) {
       case 'pencil': return '/Pen_mouse.png';
@@ -18,6 +67,7 @@ const CustomCursorIcon = ({ color = 'white', isClicked = false, mode = 'pointer'
       case 'spray': return 'https://img.icons8.com/pixel-serif/64/null/paint-spray.png';
       case 'bucket': return 'https://img.icons8.com/pixel-serif/64/null/paint-bucket.png';
       case 'stamp': return 'https://img.icons8.com/pixel-serif/64/null/stamp.png';
+      case 'lasso': return '/Lasso head.png';
       default: return null;
     }
   };
@@ -66,13 +116,24 @@ const CustomCursorIcon = ({ color = 'white', isClicked = false, mode = 'pointer'
       ) : (
         <div 
           className={`${isClicked ? 'scale-90' : 'scale-100'} transition-transform p-0 flex items-center justify-center`}
+          style={{ 
+            transform: mode === 'lasso' || mode === 'hammer' ? 'translate(-50%, -50%)' : 'none'
+          }}
         >
           <img 
             src={iconSrc || "/Pen_mouse.png"} 
             alt={mode} 
-            className="w-10 h-10 object-contain pixelated drop-shadow-[2px_2px_0_rgba(0,0,0,0.5)]" 
+            className={`${mode === 'lasso' ? 'w-16 h-16' : 'w-10 h-10'} object-contain pixelated drop-shadow-[2px_2px_0_rgba(0,0,0,0.5)]`} 
+            style={{ 
+              transform: (mode === 'lasso' && isLassoActive) ? `rotate(${lassoAngle}deg)` : 'none'
+            }}
             onError={(e) => { (e.target as any).src = "https://img.icons8.com/pixel-serif/64/null/pencil.png" }}
           />
+          {mode === 'lasso' && isLassoActive && (
+             <div className="absolute -top-6 left-1/2 -translate-x-1/2 bg-yellow-400 text-black text-[10px] font-bold px-1 rounded-sm border border-black animate-bounce shadow-sm">
+                READY
+             </div>
+          )}
         </div>
       )}
       {isClicked && (
@@ -84,6 +145,54 @@ const CustomCursorIcon = ({ color = 'white', isClicked = false, mode = 'pointer'
         />
       )}
     </div>
+  );
+};
+
+// Rope component for lasso
+const LassoRope = ({ from, to }: { from: { x: number, y: number }, to: { x: number, y: number } }) => {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  
+  // Create a springy/wavy path for the rope
+  const segments = 10;
+  let pathD = `M ${from.x} ${from.y}`;
+  
+  for (let i = 1; i <= segments; i++) {
+    const t = i / segments;
+    const px = from.x + dx * t;
+    const py = from.y + dy * t;
+    
+    // Add some "sine" wave/sag based on distance
+    const wave = Math.sin(t * Math.PI) * (dist / 8);
+    const perpX = -(to.y - from.y) / dist;
+    const perpY = (to.x - from.x) / dist;
+    
+    const finalX = px + (perpX * wave * 0.2);
+    const finalY = py + (perpY * wave * 0.2) + (Math.sin(t * Math.PI) * 50); // Gravity sag
+    
+    pathD += ` L ${finalX} ${finalY}`;
+  }
+
+  return (
+    <svg className="absolute inset-0 w-full h-full pointer-events-none z-[5000]" style={{ filter: 'drop-shadow(0 2px 2px rgba(0,0,0,0.5))' }}>
+      <path 
+        d={pathD} 
+        fill="none" 
+        stroke="#d97706" 
+        strokeWidth="4" 
+        strokeLinecap="round"
+        className="opacity-90"
+      />
+      <path 
+        d={pathD} 
+        fill="none" 
+        stroke="#78350f" 
+        strokeWidth="2" 
+        strokeDasharray="2 4"
+        className="opacity-50"
+      />
+    </svg>
   );
 };
 
@@ -108,19 +217,21 @@ interface UserState {
   username: string;
   health: number;
   isReady: boolean;
-  cursorMode: 'pointer' | 'pencil' | 'eraser' | 'hammer' | 'spray' | 'bucket' | 'stamp';
+  cursorMode: 'pointer' | 'pencil' | 'eraser' | 'hammer' | 'spray' | 'bucket' | 'stamp' | 'lasso';
+  isRagdoll?: boolean;
 }
 
 interface PlayerRowProps {
   name: string;
   health: number;
+  stamina?: number;
   isReady: boolean;
   onReady?: () => void;
   isSelf: boolean;
 }
 
 function PlayerRow(props: PlayerRowProps) {
-  const { name, health, isReady, onReady, isSelf } = props;
+  const { name, health, stamina, isReady, onReady, isSelf } = props;
   const [displayHealth, setDisplayHealth] = useState(health);
   const [isHit, setIsHit] = useState(false);
 
@@ -138,52 +249,69 @@ function PlayerRow(props: PlayerRowProps) {
   }, [health, displayHealth]);
 
   return (
-    <div className="flex items-center gap-3 p-2 bg-white border border-gray-300 shadow-sm">
-      <div className="flex-1">
-        <div className="flex justify-between items-center mb-1">
-          <span className={`text-[10px] font-bold uppercase tracking-tighter ${isSelf ? 'text-blue-600' : 'text-gray-700'}`}>{name}</span>
-          <span className="text-[10px] font-mono leading-none">{health}%</span>
+    <div className="flex flex-col gap-1 p-2 bg-white border border-gray-300 shadow-sm">
+      <div className="flex items-center gap-3">
+        <div className="flex-1">
+          <div className="flex justify-between items-center mb-1">
+            <span className={`text-[10px] font-bold uppercase tracking-tighter ${isSelf ? 'text-blue-600' : 'text-gray-700'}`}>{name}</span>
+            <span className="text-[10px] font-mono leading-none">{health}%</span>
+          </div>
+          <div className="w-full h-3 bg-gray-200 border border-gray-400 relative overflow-hidden">
+            {/* Ghost Health (Red) */}
+            <motion.div 
+              animate={{ width: `${displayHealth}%` }}
+              transition={{ duration: 1.5, ease: "easeOut" }}
+              className="absolute top-0 left-0 h-full bg-red-600 opacity-50"
+            />
+            {/* Current Health (Green) */}
+            <motion.div 
+              animate={{ width: `${health}%` }}
+              transition={{ duration: 0.1 }}
+              className={`absolute top-0 left-0 h-full ${health > 50 ? 'bg-green-500' : health > 20 ? 'bg-yellow-500' : 'bg-red-500'}`}
+            />
+            {/* Flash Effect */}
+            <AnimatePresence>
+              {isHit && (
+                <motion.div 
+                  initial={{ opacity: 0.8 }}
+                  animate={{ opacity: 0 }}
+                  exit={{ opacity: 0 }}
+                  className="absolute inset-0 bg-white"
+                />
+              )}
+            </AnimatePresence>
+          </div>
         </div>
-        <div className="w-full h-3 bg-gray-200 border border-gray-400 relative overflow-hidden">
-          {/* Ghost Health (Red) */}
-          <motion.div 
-            animate={{ width: `${displayHealth}%` }}
-            transition={{ duration: 1.5, ease: "easeOut" }}
-            className="absolute top-0 left-0 h-full bg-red-600 opacity-50"
-          />
-          {/* Current Health (Green) */}
-          <motion.div 
-            animate={{ width: `${health}%` }}
-            transition={{ duration: 0.1 }}
-            className={`absolute top-0 left-0 h-full ${health > 50 ? 'bg-green-500' : health > 20 ? 'bg-yellow-500' : 'bg-red-500'}`}
-          />
-          {/* Flash Effect */}
-          <AnimatePresence>
-            {isHit && (
-              <motion.div 
-                initial={{ opacity: 0.8 }}
-                animate={{ opacity: 0 }}
-                exit={{ opacity: 0 }}
-                className="absolute inset-0 bg-white"
-              />
-            )}
-          </AnimatePresence>
-        </div>
+        {onReady ? (
+          <button 
+            onClick={onReady}
+            className={`px-3 py-1 border-2 text-[9px] font-black uppercase transition-all ${
+              isReady 
+                ? 'bg-green-500 border-green-700 text-white' 
+                : 'bg-gray-100 border-gray-400 text-gray-500 hover:bg-gray-200'
+            }`}
+          >
+            {isReady ? 'READY!' : 'READY?'}
+          </button>
+        ) : (
+          <div className={`text-[9px] font-black uppercase px-2 py-1 border ${isReady ? 'text-green-600 bg-green-50 border-green-200' : 'text-gray-400 bg-gray-50 border-gray-200'}`}>
+            {isReady ? 'READY' : '...'}
+          </div>
+        )}
       </div>
-      {onReady ? (
-        <button 
-          onClick={onReady}
-          className={`px-3 py-1 border-2 text-[9px] font-black uppercase transition-all ${
-            isReady 
-              ? 'bg-green-500 border-green-700 text-white' 
-              : 'bg-gray-100 border-gray-400 text-gray-500 hover:bg-gray-200'
-          }`}
-        >
-          {isReady ? 'READY!' : 'READY?'}
-        </button>
-      ) : (
-        <div className={`text-[9px] font-black uppercase px-2 py-1 border ${isReady ? 'text-green-600 bg-green-50 border-green-200' : 'text-gray-400 bg-gray-50 border-gray-200'}`}>
-          {isReady ? 'READY' : '...'}
+      
+      {isSelf && stamina !== undefined && (
+        <div className="flex flex-col gap-0.5">
+          <div className="flex justify-between items-center">
+             <span className="text-[8px] font-bold text-blue-400">STAMINA</span>
+             <span className="text-[8px] font-mono">{Math.round(stamina)}%</span>
+          </div>
+          <div className="w-full h-1.5 bg-gray-200 border border-gray-400">
+             <motion.div 
+               animate={{ width: `${stamina}%` }}
+               className="h-full bg-blue-400"
+             />
+          </div>
         </div>
       )}
     </div>
@@ -196,11 +324,84 @@ export default function App() {
   const [isClicked, setIsClicked] = useState(false);
   const [otherUsers, setOtherUsers] = useState<Record<string, UserState>>({});
   const [health, setHealth] = useState(100);
+  const [stamina, setStamina] = useState(100);
+  const [lastSwipeTime, setLastSwipeTime] = useState(0);
   const [cursorMode, setCursorMode] = useState<'pointer' | 'pencil'>('pointer');
   const cursorModeRef = useRef(cursorMode);
-  useEffect(() => { cursorModeRef.current = cursorMode; }, [cursorMode]);
+  useEffect(() => { 
+    if (cursorModeRef.current === 'pencil' && currentDrawingRef.current.length > 2) {
+      // Auto-convert drawing when switching away from pencil
+      const points = [...currentDrawingRef.current];
+      // Close loop
+      points.push({ ...points[0] });
+      
+      const newObj: PhysicsObject = {
+        id: Math.random().toString(),
+        points,
+        x: points.reduce((acc, p) => acc + p.x, 0) / points.length,
+        y: points.reduce((acc, p) => acc + p.y, 0) / points.length,
+        angle: 0,
+        color: `hsl(${Math.random() * 360}, 70%, 60%)`,
+        creatorId: socketRef.current?.id || '',
+        heldBy: null,
+        throwsRemaining: 2,
+        createdAt: Date.now(),
+        damage: 3
+      };
+      socketRef.current?.emit('add-physics-object', newObj);
+      setCurrentDrawing([]);
+    }
+    cursorModeRef.current = cursorMode; 
+  }, [cursorMode]);
 
+  const [unlockedModes, setUnlockedModes] = useState<string[]>(['pointer', 'pencil']);
   const [winner, setWinner] = useState<{id: string, name: string} | null>(null);
+  const [lassoState, setLassoState] = useState<{ active: boolean, swingAngle: number, fired: boolean, targetId: string | null, startTime: number, ropePoints: {x: number, y: number}[] }>({ active: false, swingAngle: 0, fired: false, targetId: null, startTime: 0, ropePoints: [] });
+  const lassoStateRef = useRef(lassoState);
+  useEffect(() => { lassoStateRef.current = lassoState; }, [lassoState]);
+  const circleDetectionPoints = useRef<{x: number, y: number, t: number}[]>([]);
+
+  useEffect(() => {
+    if (cursorMode === 'lasso' && lassoState.active && !lassoState.fired) {
+      const interval = setInterval(() => {
+        setLassoState(prev => ({ ...prev, swingAngle: (prev.swingAngle + 15) % 360 }));
+      }, 16);
+      return () => clearInterval(interval);
+    }
+  }, [cursorMode, lassoState.active, lassoState.fired]);
+
+  const detectCircularMotion = (newPoint: {x: number, y: number}) => {
+    if (cursorModeRef.current !== 'lasso') return;
+    const now = Date.now();
+    circleDetectionPoints.current.push({ ...newPoint, t: now });
+    
+    // Maintain a 1-second window of points
+    circleDetectionPoints.current = circleDetectionPoints.current.filter(p => now - p.t < 1000);
+    
+    if (circleDetectionPoints.current.length < 5) return;
+
+    // Calculate center of recent motion
+    const avgX = circleDetectionPoints.current.reduce((a, b) => a + b.x, 0) / circleDetectionPoints.current.length;
+    const avgY = circleDetectionPoints.current.reduce((a, b) => a + b.y, 0) / circleDetectionPoints.current.length;
+    
+    // Calculate total angular change
+    let totalAngle = 0;
+    for (let i = 1; i < circleDetectionPoints.current.length; i++) {
+      const p1 = circleDetectionPoints.current[i-1];
+      const p2 = circleDetectionPoints.current[i];
+      const a1 = Math.atan2(p1.y - avgY, p1.x - avgX);
+      const a2 = Math.atan2(p2.y - avgY, p2.x - avgX);
+      let diff = a2 - a1;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      totalAngle += diff;
+    }
+
+    // Trigger if we've done roughly 0.8 rotations
+    if (Math.abs(totalAngle) > Math.PI * 1.6 && !lassoStateRef.current.active) {
+      setLassoState(prev => ({ ...prev, active: true, swingAngle: 0 }));
+    }
+  };
 
   const [chargeProgress, setChargeProgress] = useState(0);
   const chargeStartTime = useRef<number | null>(null);
@@ -211,7 +412,29 @@ export default function App() {
   useEffect(() => { healthRef.current = health; }, [health]);
 
   const [money, setMoney] = useState(0);
-  const [unlockedModes, setUnlockedModes] = useState<string[]>(['pointer', 'pencil']);
+  const [currentServer, setCurrentServer] = useState<string>('public');
+  const currentServerRef = useRef(currentServer);
+  useEffect(() => { currentServerRef.current = currentServer; }, [currentServer]);
+
+  useEffect(() => {
+    if (currentServer === 'training') {
+      setMoney(7000);
+      const interval = setInterval(() => {
+        setOtherUsers(prev => {
+          if (!prev['dummy-id'] || !prev['dummy-id'].isReady) {
+            return {
+              ...prev,
+              ['dummy-id']: {
+                x: 500, y: 500, username: 'DUMMY [TRAINING]', health: prev['dummy-id']?.health ?? 100, isReady: true, cursorMode: 'pointer'
+              }
+            };
+          }
+          return prev;
+        });
+      }, 2000);
+      return () => clearInterval(interval);
+    }
+  }, [currentServer]);
   const [showModeSwitch, setShowModeSwitch] = useState(false);
   const [lastModeChange, setLastModeChange] = useState(0);
   const scrollAccumulator = useRef(0);
@@ -220,6 +443,8 @@ export default function App() {
 
   const [physicsObjects, setPhysicsObjects] = useState<PhysicsObject[]>([]);
   const [currentDrawing, setCurrentDrawing] = useState<{x: number, y: number}[]>([]);
+  const currentDrawingRef = useRef(currentDrawing);
+  useEffect(() => { currentDrawingRef.current = currentDrawing; }, [currentDrawing]);
   const physicsEngine = useRef<any>(null);
   const physicsBodies = useRef<Record<string, any>>({});
   const lastPhysicsUpdate = useRef(0);
@@ -232,8 +457,20 @@ export default function App() {
   useEffect(() => {
     import('matter-js').then(Matter => {
       const engine = Matter.Engine.create();
-      engine.gravity.y = 0.5; // Desktop gravity
+      engine.gravity.y = 0.8; // Stronger gravity for more impact
       physicsEngine.current = engine;
+
+      // Add a static box around the desktop
+      const ground = Matter.Bodies.rectangle(500, 985, 1200, 50, { 
+        isStatic: true,
+        label: 'ground',
+        friction: 0.8,
+        restitution: 0.2
+      });
+      const leftWall = Matter.Bodies.rectangle(-25, 500, 50, 1200, { isStatic: true });
+      const rightWall = Matter.Bodies.rectangle(1025, 500, 50, 1200, { isStatic: true });
+      const ceiling = Matter.Bodies.rectangle(500, -25, 1200, 50, { isStatic: true });
+      Matter.World.add(engine.world, [ground, leftWall, rightWall, ceiling]);
 
       const runner = () => {
         if (!physicsEngine.current) return;
@@ -244,12 +481,49 @@ export default function App() {
         let needsStateUpdate = false;
 
         const now = Date.now();
+
+        // Sync player ragdolls
         Object.entries(physicsBodies.current).forEach(([id, b]) => {
+          const body = b as any;
+          if (id.startsWith('player-ragdoll-')) {
+            const userId = id.replace('player-ragdoll-', '');
+            const isMe = userId === socketRef.current?.id;
+            
+            if (isMe) {
+              // Move myself and notify others
+              lastMousePos.current = { x: body.position.x, y: body.position.y };
+              socketRef.current?.emit('mouse-move', { x: body.position.x, y: body.position.y });
+            } else {
+              // Only update others if we're not receiving updates from them? 
+              // Actually, if we're all simulating the same physics, it might desync.
+              // But for simple "ragdoll", local simulation is fine for visual punch.
+              setOtherUsers(prev => {
+                if (!prev[userId]) return prev;
+                return {
+                  ...prev,
+                  [userId]: { ...prev[userId], x: body.position.x, y: body.position.y }
+                };
+              });
+            }
+
+            // Damage on impact
+            const speed = Math.sqrt(body.velocity.x**2 + body.velocity.y**2);
+            if (speed > 12 && (body.position.x < 40 || body.position.x > 960 || body.position.y < 40 || body.position.y > 960)) {
+              if (isMe) setHealth(h => Math.max(0, h - 3));
+              const popupId = Math.random().toString();
+              setDamagePopups(prev => [...prev.slice(-10), { id: popupId, playerId: userId, amount: 3, x: body.position.x, y: body.position.y }]);
+              setTimeout(() => setDamagePopups(prev => prev.filter(p => p.id !== popupId)), 2000);
+            }
+          }
+        });
+
+        Object.entries(physicsBodies.current).forEach(([id, b]) => {
+          if (id.startsWith('player-ragdoll-')) return; // handled above
           const body = b as any;
           const obj = physicsObjectsRef.current.find(o => o.id === id);
           if (obj) {
-            // Auto-cleanup: 6 seconds without being held
-            if (obj.heldBy === null && now - obj.createdAt > 6000 && obj.creatorId === socketRef.current?.id) {
+            // Auto-cleanup: 30 seconds without being held
+            if (obj.heldBy === null && now - obj.createdAt > 30000 && obj.creatorId === socketRef.current?.id) {
               socketRef.current?.emit('remove-physics-object', id);
               return;
             }
@@ -265,22 +539,33 @@ export default function App() {
             
             // Check for collision with players if it's "thrown" (moving fast)
             const speed = Math.sqrt(body.velocity.x**2 + body.velocity.y**2);
-            if (speed > 5 && obj.heldBy === null) {
+            const fightsOpen = windowsRef.current.find(w => w.id === 'fights-exe')?.isOpen;
+            
+            const isTraining = currentServerRef.current === 'training';
+            
+            if (speed > 5 && obj.heldBy === null && (fightsOpen || isGameActiveRef.current || isTraining)) {
               Object.entries(otherUsersRef.current).forEach(([uid, user]) => {
                 const u = user as UserState;
                 if (u.health <= 0) return; // Don't hit dead players
                 const dist = Math.sqrt(Math.pow(body.position.x - u.x, 2) + Math.pow(body.position.y - u.y, 2));
-                if (dist < 40) {
-                  socketRef.current?.emit('damage-player', { targetId: uid, damage: obj.damage });
+                if (dist < 60) {
+                  if (uid === 'dummy-id') {
+                    setOtherUsers(prev => ({
+                      ...prev,
+                      ['dummy-id']: { ...prev['dummy-id'], health: Math.max(0, prev['dummy-id'].health - obj.damage) }
+                    }));
+                  } else {
+                    socketRef.current?.emit('damage-player', { targetId: uid, damage: obj.damage });
+                  }
                   // Remove object after hit
                   socketRef.current?.emit('remove-physics-object', id);
                 }
               });
               
               // Also check self
-              if (healthRef.current > 0 && obj.creatorId !== socketRef.current?.id) {
+              if (healthRef.current > 0 && (isTraining || obj.creatorId !== socketRef.current?.id)) {
                 const dist = Math.sqrt(Math.pow(body.position.x - lastMousePos.current.x, 2) + Math.pow(body.position.y - lastMousePos.current.y, 2));
-                if (dist < 40) {
+                if (dist < 60) {
                    socketRef.current?.emit('damage-player', { targetId: socketRef.current?.id || '', damage: obj.damage });
                    socketRef.current?.emit('remove-physics-object', id);
                 }
@@ -304,6 +589,7 @@ export default function App() {
   }, []);
   const [isReady, setIsReady] = useState(false);
   const [isGameActive, setIsGameActive] = useState(false);
+  const [screenShake, setScreenShake] = useState(false);
   const isGameActiveRef = useRef(isGameActive);
   useEffect(() => { isGameActiveRef.current = isGameActive; }, [isGameActive]);
 
@@ -311,25 +597,45 @@ export default function App() {
   const [swipes, setSwipes] = useState<{id: string, attackerId: string, from: {x: number, y: number}, to: {x: number, y: number}, color?: string}[]>([]);
   const lastTrailPoint = useRef({ x: 0, y: 0 });
   const [damagePopups, setDamagePopups] = useState<{id: string, playerId: string, amount: number, x: number, y: number}[]>([]);
+  const [hitSparks, setHitSparks] = useState<{id: string, x: number, y: number}[]>([]);
   
   const mouseVelocity = useRef({ x: 0, y: 0 });
+  const lastVelocities = useRef<{x: number, y: number}[]>([]);
   const lastMousePos = useRef({ x: 0, y: 0 });
   const isSwiping = useRef(false);
   const swipeStartPos = useRef({ x: 0, y: 0 });
   const lastSwipeTick = useRef(0);
   const dragOffset = useRef({ x: 0, y: 0 });
+  const swipePath = useRef<{x: number, y: number, t: number}[]>([]);
+  const isMouseDown = useRef(false);
+  const swipeStartTime = useRef(0);
+
+  // Stamina regeneration
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setStamina(prev => Math.min(100, prev + 2));
+    }, 100);
+    return () => clearInterval(interval);
+  }, []);
 
   const [isStartOpen, setIsStartOpen] = useState(false);
-  const [currentServer, setCurrentServer] = useState<string>('public');
-  const currentServerRef = useRef(currentServer);
-  useEffect(() => { currentServerRef.current = currentServer; }, [currentServer]);
-  const [username, setUsername] = useState(`Guest_${Math.floor(Math.random() * 9000) + 1000}`);
+  const [username, setUsername] = useState(() => {
+    return localStorage.getItem('xp_username') || `Guest_${Math.floor(Math.random() * 9000) + 1000}`;
+  });
   const [serverInput, setServerInput] = useState('');
-  const [usernameInput, setUsernameInput] = useState('');
+  const [usernameInput, setUsernameInput] = useState(username);
+
+  useEffect(() => {
+    localStorage.setItem('xp_username', username);
+  }, [username]);
   const [showTutorial, setShowTutorial] = useState(true);
   
   const [isConnected, setIsConnected] = useState(false);
   
+  const [isRagdoll, setIsRagdoll] = useState(false);
+  const isRagdollRef = useRef(false);
+  useEffect(() => { isRagdollRef.current = isRagdoll; }, [isRagdoll]);
+
   const socketRef = useRef<Socket | null>(null);
   const desktopRef = useRef<HTMLDivElement>(null);
 
@@ -337,10 +643,103 @@ export default function App() {
     { id: 'my-computer', title: 'My Computer', isOpen: false, x: 100, y: 100, width: 400, height: 300, draggedBy: null, openedBy: null },
     { id: 'server-join', title: 'Connect to Server', isOpen: false, x: 250, y: 200, width: 350, height: 280, draggedBy: null, openedBy: null },
     { id: 'fights-exe', title: 'Fights.exe', isOpen: false, x: 350, y: 250, width: 500, height: 380, draggedBy: null, openedBy: null },
-    { id: 'shop-exe', title: 'Shop.exe', isOpen: false, x: 400, y: 300, width: 450, height: 500, draggedBy: null, openedBy: null }
+    { id: 'shop-exe', title: 'Shop.exe', isOpen: false, x: 400, y: 300, width: 450, height: 500, draggedBy: null, openedBy: null },
+    { id: 'explorer-exe', title: 'Windows Explorer', isOpen: false, x: 150, y: 150, width: 550, height: 400, draggedBy: null, openedBy: null },
+    { id: 'browser-exe', title: 'Internet Explorer', isOpen: false, x: 200, y: 120, width: 600, height: 500, draggedBy: null, openedBy: null }
   ]);
   const [time, setTime] = useState(new Date());
   const [isBooting, setIsBooting] = useState(true);
+  const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [isNewUser, setIsNewUser] = useState(false);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+      setIsAuthLoading(false);
+      if (user) {
+        setUsername(user.displayName || `User_${user.uid.slice(0, 4)}`);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Sync state with Firestore
+  useEffect(() => {
+    if (!currentUser || currentUser.uid.startsWith('guest-')) return;
+
+    const userDocRef = doc(db, 'users', currentUser.uid);
+    
+    const unsubscribe = onSnapshot(userDocRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setMoney(data.money ?? 0);
+        setUnlockedModes(data.unlockedModes ?? ['pointer', 'pencil']);
+      } else {
+        // Initialize user doc if it doesn't exist
+        const initialData = {
+          username: currentUser.displayName || username,
+          email: currentUser.email,
+          money: 0,
+          unlockedModes: ['pointer', 'pencil'],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        setDoc(userDocRef, initialData).catch(err => handleFirestoreError(err, OperationType.WRITE, `users/${currentUser.uid}`));
+      }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, `users/${currentUser.uid}`);
+    });
+
+    return () => unsubscribe();
+  }, [currentUser]);
+
+  // Persist local state changes to Firestore
+  useEffect(() => {
+    if (!currentUser || currentUser.uid.startsWith('guest-')) return;
+    const userDocRef = doc(db, 'users', currentUser.uid);
+    
+    // Using a debounced or throttled approach would be better, 
+    // but for simple stats like money/modes we can just update.
+    // To avoid loops with onSnapshot, we can use metadata or just trust Firestore's local cache.
+    const updateSession = async () => {
+      try {
+        const snap = await getDoc(userDocRef);
+        if (snap.exists()) {
+          const data = snap.data();
+          // Only update if local state is different and we have data
+          if (JSON.stringify(data.unlockedModes) !== JSON.stringify(unlockedModes) || data.money !== money) {
+             await updateDoc(userDocRef, {
+               money,
+               unlockedModes,
+               updatedAt: new Date().toISOString()
+             }).catch(err => handleFirestoreError(err, OperationType.UPDATE, `users/${currentUser.uid}`));
+          }
+        }
+      } catch (err) {
+        console.error("Firestore sync error:", err);
+      }
+    };
+
+    updateSession();
+  }, [money, unlockedModes, currentUser]);
+
+  const handleLogin = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      console.error("Login failed:", err);
+    }
+  };
+
+  const handleLogout = () => {
+    auth.signOut();
+    // Allow user to switch accounts in the UI
+    setUsernameInput('');
+    socketRef.current?.disconnect();
+    setIsConnected(false);
+    toggleWindow('server-join', true);
+  };
 
   const windowsRef = useRef(windows);
   useEffect(() => { windowsRef.current = windows; }, [windows]);
@@ -370,6 +769,9 @@ export default function App() {
         others['dummy-id'] = {
           x: 500, y: 500, username: 'DUMMY [TRAINING]', health: 100, isReady: true, cursorMode: 'pointer'
         };
+        setMoney(7000);
+      } else {
+        // Reset money if leaving training? (User didn't ask but usually training is sandbox)
       }
 
       if (self) {
@@ -418,6 +820,60 @@ export default function App() {
         }
         return w;
       }));
+    });
+
+    socket.on('user-effect', ({ userId, effect, duration }: { userId: string, effect: string, duration: number }) => {
+      if (effect === 'ragdoll') {
+        const isMe = userId === socketRef.current?.id;
+        if (isMe) {
+          setHealth(h => Math.max(0, h - 5));
+          setIsRagdoll(true);
+        }
+        
+        setOtherUsers(prev => ({
+          ...prev,
+          [userId]: { ...prev[userId], isRagdoll: true }
+        }));
+
+        import('matter-js').then(Matter => {
+          if (!physicsEngine.current) return;
+          const bodyId = `player-ragdoll-${userId}`;
+          
+          // Get current position of target
+          let startPos = { x: 500, y: 500 };
+          if (isMe) {
+            startPos = { x: lastMousePos.current.x, y: lastMousePos.current.y };
+          } else if (otherUsersRef.current[userId]) {
+            startPos = { x: otherUsersRef.current[userId].x, y: otherUsersRef.current[userId].y };
+          }
+
+          const body = Matter.Bodies.circle(startPos.x, startPos.y, 40, {
+            label: bodyId,
+            restitution: 0.6,
+            friction: 0.1,
+            density: 0.005,
+            frictionAir: 0.01
+          });
+          
+          // Give it a little random kick
+          Matter.Body.setVelocity(body, { x: (Math.random() - 0.5) * 10, y: -10 });
+          
+          Matter.World.add(physicsEngine.current.world, body);
+          physicsBodies.current[bodyId] = body;
+
+          setTimeout(() => {
+            if (physicsBodies.current[bodyId] && physicsEngine.current) {
+              Matter.World.remove(physicsEngine.current.world, physicsBodies.current[bodyId]);
+              delete physicsBodies.current[bodyId];
+            }
+            if (isMe) setIsRagdoll(false);
+            setOtherUsers(prev => ({
+              ...prev,
+              [userId]: { ...prev[userId], isRagdoll: false }
+            }));
+          }, duration);
+        });
+      }
     });
 
     socket.on('physics-object-moved', ({ id, pos }: { id: string, pos: { x: number, y: number } }) => {
@@ -488,35 +944,42 @@ export default function App() {
       }
     });
 
-    socket.on('visual-swipe', ({ attackerId, from, to }: any) => {
+    socket.on('swipe-attack', ({ attackerId, from, to, isCharged: charged }: { attackerId: string, from: {x: number, y: number}, to: {x: number, y: number}, isCharged?: boolean }) => {
       const swipeId = Math.random().toString();
-      setSwipes(prev => [...prev, { id: swipeId, attackerId, from, to }]);
-      setTimeout(() => setSwipes(prev => prev.filter(s => s.id !== swipeId)), 1200);
+      setSwipes(prev => [...prev.slice(-15), { id: swipeId, attackerId, from, to, color: charged ? '#facc15' : undefined }]);
+      setTimeout(() => setSwipes(prev => prev.filter(s => s.id !== swipeId)), charged ? 2500 : 1200);
+
+      if (attackerId !== socketRef.current?.id) {
+        const dist = lineToPointDistance(from, to, lastMousePos.current);
+        if (dist < 40) {
+          setHealth(h => Math.max(0, h - (charged ? 5 : 1))); 
+        }
+      }
+    });
+
+    socket.on('visual-swipe', ({ attackerId, from, to, isCharged: charged }: any) => {
+      const swipeId = Math.random().toString();
+      setSwipes(prev => [...prev, { id: swipeId, attackerId, from, to, color: charged ? '#facc15' : undefined }]);
+      setTimeout(() => setSwipes(prev => prev.filter(s => s.id !== swipeId)), charged ? 2500 : 1200);
     });
 
     socket.on('physics-object-added', (obj: PhysicsObject) => {
       setPhysicsObjects(prev => [...prev, obj]);
       import('matter-js').then(Matter => {
         if (!physicsEngine.current) return;
-        // Calculate center of points to create body correctly
-        const minX = Math.min(...obj.points.map(p => p.x));
-        const maxX = Math.max(...obj.points.map(p => p.x));
-        const minY = Math.min(...obj.points.map(p => p.y));
-        const maxY = Math.max(...obj.points.map(p => p.y));
-        const centerX = (minX + maxX) / 2;
-        const centerY = (minY + maxY) / 2;
-
-        // Simplify vertices for Matter.js: use convex hull for reliability
+        // Simplify vertices for Matter.js: use convex hull for reliability, and ensure mass
         const vertices = Matter.Vertices.hull(obj.points.map(p => ({ x: p.x, y: p.y })));
-        const body = Matter.Bodies.fromVertices(centerX, centerY, [vertices], {
+        const body = Matter.Bodies.fromVertices(obj.x, obj.y, [vertices], {
           render: { fillStyle: obj.color },
           label: obj.id,
-          restitution: 0.5,
-          friction: 0.1
+          restitution: 0.1, // Less bouncy for drawings
+          friction: 0.8,
+          frictionAir: 0.05,
+          density: 0.01 // Make them feel heavy
         });
         
         // Fallback to rectangle if vertices composition fails
-        const finalBody = body || Matter.Bodies.rectangle(centerX, centerY, Math.max(20, maxX - minX), Math.max(20, maxY - minY), {
+        const finalBody = body || Matter.Bodies.rectangle(obj.x, obj.y, 40, 40, {
           label: obj.id,
           restitution: 0.5
         });
@@ -563,7 +1026,8 @@ export default function App() {
         const body = physicsBodies.current[id];
         if (body) {
           Matter.Body.setStatic(body, false);
-          Matter.Body.setVelocity(body, { x: velocity.x * 0.2, y: velocity.y * 0.2 });
+          // Stronger multiplier for more realistic throwing feel
+          Matter.Body.setVelocity(body, { x: velocity.x * 2.5, y: velocity.y * 2.5 });
         }
       });
     });
@@ -575,6 +1039,12 @@ export default function App() {
       setWinner(null);
       setCountdown(null);
       const { [socket.id as string]: self, ...others } = usersMap;
+      if (currentServerRef.current === 'training') {
+        others['dummy-id'] = {
+          x: 500, y: 500, username: 'DUMMY [TRAINING]', health: 100, isReady: true, cursorMode: 'pointer'
+        };
+        setMoney(7000);
+      }
       setOtherUsers(others);
     });
 
@@ -602,27 +1072,27 @@ export default function App() {
     };
   }, []); // Truly stable initialization
 
+  // Coordinate conversion helpers
+  const normalize = (pos: { x: number, y: number }) => {
+    const bounds = desktopRef.current?.getBoundingClientRect();
+    if (!bounds) return pos;
+    return {
+      x: (pos.x - bounds.left) / bounds.width * 1000,
+      y: (pos.y - bounds.top) / bounds.height * 1000
+    };
+  };
+
+  const denormalize = (pos: { x: number, y: number }) => {
+    const bounds = desktopRef.current?.getBoundingClientRect();
+    if (!bounds) return pos;
+    return {
+      x: (pos.x / 1000) * bounds.width,
+      y: (pos.y / 1000) * bounds.height
+    };
+  };
+
   // Mouse Listeners handled separately to use latest state refs
   useEffect(() => {
-  // Normalized coordinates (0-1000)
-    const normalize = (pos: { x: number, y: number }) => {
-      const bounds = desktopRef.current?.getBoundingClientRect();
-      if (!bounds) return pos;
-      return {
-        x: (pos.x - bounds.left) / bounds.width * 1000,
-        y: (pos.y - bounds.top) / bounds.height * 1000
-      };
-    };
-
-    const denormalize = (pos: { x: number, y: number }) => {
-      const bounds = desktopRef.current?.getBoundingClientRect();
-      if (!bounds) return pos;
-      return {
-        x: (pos.x / 1000) * bounds.width,
-        y: (pos.y / 1000) * bounds.height
-      };
-    };
-
     const checkAutoclicker = () => {
       const now = Date.now();
       clickTimes.current = clickTimes.current.filter(t => now - t < 1000);
@@ -636,9 +1106,80 @@ export default function App() {
     };
 
     const handleMouseMove = (e: MouseEvent) => {
+      if (isRagdollRef.current) return;
       const screenPos = { x: e.clientX, y: e.clientY };
       const pos = normalize(screenPos);
       setMousePos(pos);
+
+      if (isMouseDown.current) {
+        swipePath.current.push({...pos, t: Date.now()});
+      }
+      
+      // Update uiMousePos as percentages to stay consistent with logical coordinate system
+      setUiMousePos({
+        x: pos.x / 10,
+        y: pos.y / 10
+      });
+      
+      if (cursorModeRef.current === 'lasso') {
+        const speed = Math.sqrt(mouseVelocity.current.x**2 + mouseVelocity.current.y**2);
+        if (isSwiping.current) {
+          detectCircularMotion(pos);
+        } else if (lassoStateRef.current.active && !lassoStateRef.current.fired) {
+          // Keep it active but check if we should deactivate if speed is 0 for too long
+        }
+      }
+
+      // Lasso Ragdoll Fling logic
+      if (lassoStateRef.current.targetId) {
+        const targetId = lassoStateRef.current.targetId;
+        const targetState = targetId === 'dummy-id' ? otherUsersRef.current['dummy-id'] : otherUsersRef.current[targetId];
+        
+        if (targetState) {
+          // Calculate move towards mouse with high momentum and a bit of "spring"
+          const dx = pos.x - targetState.x;
+          const dy = pos.y - targetState.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          
+          // Tighten the rope if pulled far
+          if (dist > 30) {
+            const pullStrength = 0.25; // Snappy follows mouse
+            let newX = targetState.x + dx * pullStrength;
+            let newY = targetState.y + dy * pullStrength;
+            
+            // Add some gravity influence
+            newY += 2; 
+
+            // Check for border collisions with damage and impact bounce
+            let tookDamage = false;
+            if (newX < 30 || newX > 970 || newY < 30 || newY > 970) {
+              tookDamage = true;
+              newX = Math.max(30, Math.min(970, newX));
+              newY = Math.max(30, Math.min(970, newY));
+            }
+
+            if (targetId === 'dummy-id') {
+              setOtherUsers(prev => ({
+                ...prev,
+                ['dummy-id']: { 
+                  ...prev['dummy-id'], 
+                  x: newX, 
+                  y: newY, 
+                  health: tookDamage ? Math.max(0, prev['dummy-id'].health - 3) : prev['dummy-id'].health 
+                }
+              }));
+              if (tookDamage) {
+                const popupId = Math.random().toString();
+                setDamagePopups(prev => [...prev.slice(-10), { id: popupId, playerId: 'dummy-id', amount: 3, x: newX, y: newY }]);
+                setTimeout(() => setDamagePopups(prev => prev.filter(p => p.id !== popupId)), 2000);
+              }
+            } else {
+              socketRef.current?.emit('force-move', { targetId, pos: { x: newX, y: newY } });
+              if (tookDamage) socketRef.current?.emit('damage-player', { targetId, damage: 3 });
+            }
+          }
+        }
+      }
       
       if (cursorModeRef.current === 'pencil' && isSwiping.current) {
         setCurrentDrawing(prev => {
@@ -663,87 +1204,50 @@ export default function App() {
       // Charge Mechanic logic: Only fills if speed is VERY low
       if (isSwiping.current && cursorModeRef.current === 'pointer') {
          const speed = Math.sqrt(mouseVelocity.current.x**2 + mouseVelocity.current.y**2);
-         if (speed < 2) { // Extremely slow movement allows charging
+         if (speed < 0.5) { // Slightly more lenient stillness
             if (chargeStartTime.current === null) {
               chargeStartTime.current = Date.now();
             } else {
               const elapsed = Date.now() - chargeStartTime.current;
-              const progress = Math.min(1, elapsed / 2500); // 2.5 seconds to full
+              const progress = Math.min(1, elapsed / 2000); // 2 seconds to full
               setChargeProgress(progress);
               if (progress >= 1 && !isCharged.current) {
                 isCharged.current = true;
-                // Add a small kick effect or sound here later
+                chargeLocation.current = { ...pos };
               }
             }
-         } else {
-            // Moving too fast resets charge
+         } else if (!isCharged.current) {
             setChargeProgress(0);
             chargeStartTime.current = null;
-            isCharged.current = false;
          }
       }
 
-      const desktopBounds = desktopRef.current?.getBoundingClientRect();
-      if (desktopBounds) {
-        setUiMousePos({
-          x: e.clientX - desktopBounds.left,
-          y: e.clientY - desktopBounds.top
-        });
+      const vel = { x: pos.x - lastMousePos.current.x, y: pos.y - lastMousePos.current.y };
+      mouseVelocity.current = vel;
+      
+      // Store some non-zero velocities for throwing flick
+      if (Math.abs(vel.x) > 0.1 || Math.abs(vel.y) > 0.1) {
+        lastVelocities.current.push({ ...vel });
+        if (lastVelocities.current.length > 12) lastVelocities.current.shift();
       }
       
-      mouseVelocity.current = {
-        x: Math.abs(pos.x - lastMousePos.current.x),
-        y: Math.abs(pos.y - lastMousePos.current.y)
-      };
       lastMousePos.current = pos;
 
       if (socketRef.current?.connected) {
         socketRef.current.emit('mouse-move', { ...pos, mode: cursorModeRef.current });
       }
-
-      // Continuous Swipe Damage
-      const fightsOpen = windowsRef.current.find(w => w.id === 'fights-exe')?.isOpen;
-      const vel = mouseVelocity.current.x + mouseVelocity.current.y;
-      
-      if (isSwiping.current && cursorModeRef.current === 'pointer' && (fightsOpen || isGameActiveRef.current) && vel > 20) {
-        const now = Date.now();
-        
-        // Visual trail locally
-        const distFromLast = Math.sqrt(Math.pow(pos.x - lastTrailPoint.current.x, 2) + Math.pow(pos.y - lastTrailPoint.current.y, 2));
-        if (distFromLast > 15) {
-          const swipeId = Math.random().toString();
-          const from = lastTrailPoint.current;
-          const to = pos;
-          
-          if (isCharged.current) {
-            socketRef.current?.emit('swipe-attack', { from, to, isCharged: true });
-            setSwipes(prev => [...prev, { id: swipeId, attackerId: socketRef.current?.id || '', from, to, color: '#facc15' }]);
-            isCharged.current = false;
-            setChargeProgress(0);
-            chargeStartTime.current = null;
-          } else {
-            socketRef.current?.emit('swipe-attack', { from, to });
-            setSwipes(prev => [...prev, { id: swipeId, attackerId: socketRef.current?.id || '', from, to, color: '#60a5fa' }]);
-          }
-          
-          setTimeout(() => setSwipes(prev => prev.filter(s => s.id !== swipeId)), 800);
-          lastTrailPoint.current = pos;
-        }
-
-        if (now - lastSwipeTick.current > 100) { // Tick every 100ms
-          Object.entries(otherUsersRef.current).forEach(([id, user]) => {
-            const u = user as UserState;
-            const dist = Math.sqrt(Math.pow(pos.x - u.x, 2) + Math.pow(pos.y - u.y, 2));
-            if (dist < 60) {
-              socketRef.current?.emit('damage-player', { targetId: id, damage: 3 });
-              lastSwipeTick.current = now;
-            }
-          });
-        }
-      }
     };
 
     const handleMouseDown = (e: MouseEvent) => {
+      if (isRagdollRef.current) return;
+      isMouseDown.current = true;
+      swipeStartTime.current = Date.now();
+      const pos = normalize({ x: e.clientX, y: e.clientY });
+      swipePath.current = [{...pos, t: Date.now()}];
+      swipeStartPos.current = pos;
+      lastTrailPoint.current = pos;
+      isSwiping.current = true;
+
       // Find what was clicked
       const target = e.target as HTMLElement;
       const isWindowOrButton = target.closest('.xp-window') || target.closest('button') || target.closest('.cursor-pointer');
@@ -754,11 +1258,7 @@ export default function App() {
       }
 
       setIsClicked(true);
-      const isCheating = checkAutoclicker();
-      const pos = normalize({ x: e.clientX, y: e.clientY });
-      swipeStartPos.current = pos;
-      lastTrailPoint.current = pos;
-      isSwiping.current = true;
+      checkAutoclicker();
 
       if (e.button === 0) { // LEFT CLICK
         if (cursorModeRef.current === 'pencil') {
@@ -804,11 +1304,14 @@ export default function App() {
           }
           const damage = Math.min(8, Math.max(1, Math.round(sharpnessScore / 2) + 1));
 
+          const centerX = points.reduce((acc, p) => acc + p.x, 0) / points.length;
+          const centerY = points.reduce((acc, p) => acc + p.y, 0) / points.length;
+
           const newObj: PhysicsObject = {
             id: Math.random().toString(),
             points,
-            x: points[0].x,
-            y: points[0].y,
+            x: centerX,
+            y: centerY,
             angle: 0,
             color: `hsl(${Math.random() * 360}, 70%, 60%)`,
             creatorId: socketRef.current?.id || '',
@@ -829,52 +1332,190 @@ export default function App() {
       if (isWindowOrButton && !target.closest('#desktop-canvas')) {
         // Just UI interaction
       } else if (cursorModeRef.current === 'pointer' && (fightsOpen || isGameActiveRef.current)) {
-        if (!isCheating) {
           Object.entries(otherUsersRef.current).forEach(([id, user]) => {
             const u = user as UserState;
             const dist = Math.sqrt(Math.pow(pos.x - u.x, 2) + Math.pow(pos.y - u.y, 2));
-            if (dist < 50) { 
-              socketRef.current?.emit('damage-player', { targetId: id, damage: 2 });
+            if (dist < 70) { 
+              if (id === 'dummy-id') {
+                setOtherUsers(prev => ({
+                  ...prev,
+                  ['dummy-id']: { ...prev['dummy-id'], health: Math.max(0, prev['dummy-id'].health - 8) }
+                }));
+              } else {
+                socketRef.current?.emit('damage-player', { targetId: id, damage: 8 });
+              }
             }
           });
-        }
       }
     };
 
     const handleMouseUp = (e: MouseEvent) => {
+      const screenPos = { x: e.clientX, y: e.clientY };
+      const pos = normalize(screenPos);
+      isMouseDown.current = false;
+      
+      const swipeDuration = Date.now() - swipeStartTime.current;
+      const swipeDist = Math.sqrt(Math.pow(pos.x - swipeStartPos.current.x, 2) + Math.pow(pos.y - swipeStartPos.current.y, 2));
+      const now = Date.now();
+      
+      const fightsOpen = windowsRef.current.find(w => w.id === 'fights-exe')?.isOpen;
+      const isCombatMode = fightsOpen || isGameActiveRef.current || currentServerRef.current === 'training';
+
+      // 1. FAST SWIPE ATTACK (Pointer mode only)
+      if (isSwiping.current && cursorModeRef.current === 'pointer' && isCombatMode) {
+        if (swipeDuration >= 140 && swipeDuration <= 400 && swipeDist > 120 && stamina >= 25 && now - lastSwipeTime > 400) {
+          const from = swipeStartPos.current;
+          const to = pos;
+          const swipeId = Math.random().toString();
+          
+          setStamina(prev => prev - 25);
+          setLastSwipeTime(now);
+          
+          socketRef.current?.emit('swipe-attack', { from, to });
+          setSwipes(prev => [...prev, { id: swipeId, attackerId: socketRef.current?.id || '', from, to, color: '#ffffff' }]);
+          setTimeout(() => setSwipes(prev => prev.filter(s => s.id !== swipeId)), 300);
+
+          setScreenShake(true);
+          setTimeout(() => setScreenShake(false), 200);
+
+          Object.entries(otherUsersRef.current).forEach(([id, user]) => {
+            const u = user as UserState;
+            if (u.health <= 0) return;
+            
+            const dist = lineToPointDistance(from, to, { x: u.x, y: u.y });
+            const p = { x: u.x, y: u.y };
+            const segmentDist = lineDist(from, to);
+            if (dist < 80 && (lineDist(from, p) < segmentDist + 40 && lineDist(to, p) < segmentDist + 40)) {
+               const sparkId = Math.random().toString();
+               setHitSparks(prev => [...prev, { id: sparkId, x: u.x, y: u.y }]);
+               setTimeout(() => setHitSparks(prev => prev.filter(s => s.id !== sparkId)), 500);
+
+               if (id === 'dummy-id') {
+                 setOtherUsers(prev => ({
+                   ...prev,
+                   ['dummy-id']: { ...prev['dummy-id'], health: Math.max(0, prev['dummy-id'].health - 12) }
+                 }));
+               } else {
+                 socketRef.current?.emit('damage-player', { targetId: id, damage: 12 });
+               }
+            }
+          });
+        }
+      }
+
+      // 2. LASSO RELEASE
+      if (isSwiping.current && cursorModeRef.current === 'lasso' && lassoStateRef.current.active && !lassoStateRef.current.fired) {
+          const firePos = { ...pos };
+          let hitId: string | null = null;
+          
+          Object.entries(otherUsersRef.current).forEach(([uid, user]) => {
+            const u = user as UserState;
+            const dist = Math.sqrt(Math.pow(u.x - firePos.x, 2) + Math.pow(u.y - firePos.y, 2));
+            if (dist < 350) hitId = uid; 
+          });
+
+          if (hitId) {
+            setLassoState(prev => ({ ...prev, fired: true, targetId: hitId, startTime: Date.now() }));
+            socketRef.current?.emit('damage-player', { targetId: hitId, damage: 0, effects: ['ragdoll'] });
+            setTimeout(() => {
+              setLassoState({ active: false, swingAngle: 0, fired: false, targetId: null, startTime: 0, ropePoints: [] });
+            }, 3000);
+          } else {
+            setLassoState({ active: false, swingAngle: 0, fired: false, targetId: null, startTime: 0, ropePoints: [] });
+          }
+      }
+        
+      // 3. PENCIL OBJECT CREATION
+      if (cursorModeRef.current === 'pencil' && currentDrawingRef.current.length > 2) {
+        const points = [...currentDrawingRef.current];
+        points.push({ ...points[0] });
+        const centerX = points.reduce((acc, p) => acc + p.x, 0) / points.length;
+        const centerY = points.reduce((acc, p) => acc + p.y, 0) / points.length;
+        const relPoints = points.map(p => ({ x: p.x - centerX, y: p.y - centerY }));
+
+        const newObj: PhysicsObject = {
+          id: Math.random().toString(),
+          points: relPoints,
+          x: centerX,
+          y: centerY,
+          angle: 0,
+          color: `hsl(${Math.random() * 360}, 70%, 60%)`,
+          creatorId: socketRef.current?.id || '',
+          heldBy: null,
+          throwsRemaining: 2,
+          createdAt: Date.now(),
+          damage: 3
+        };
+        socketRef.current?.emit('add-physics-object', newObj);
+        setCurrentDrawing([]);
+      }
+
+      // 4. CHARGED SWIPE (Old mechanic preserved)
+      if (isCharged.current && cursorModeRef.current === 'pointer') {
+        const from = chargeLocation.current;
+        const to = pos;
+        const dist = Math.sqrt((to.x - from.x)**2 + (to.y - from.y)**2);
+
+        if (dist > 30) {
+          const swipeId = Math.random().toString();
+          socketRef.current?.emit('swipe-attack', { from, to, isCharged: true });
+          setSwipes(prev => [...prev, { id: swipeId, attackerId: socketRef.current?.id || '', from, to, color: '#facc15' }]);
+          setTimeout(() => setSwipes(prev => prev.filter(s => s.id !== swipeId)), 2500);
+
+          if (fightsOpen || isGameActiveRef.current) {
+            Object.entries(otherUsersRef.current).forEach(([id, user]) => {
+              const u = user as UserState;
+              const d = lineToPointDistance(from, to, { x: u.x, y: u.y });
+              if (d < 60) {
+                if (id === 'dummy-id') {
+                  setOtherUsers(prev => ({
+                    ...prev,
+                    ['dummy-id']: { ...prev['dummy-id'], health: Math.max(0, prev['dummy-id'].health - 4) }
+                  }));
+                } else {
+                  socketRef.current?.emit('damage-player', { targetId: id, damage: 4 });
+                }
+              }
+            });
+          }
+        }
+      }
+
+      // 5. PHYSICS GRAB RELEASE
+      if (grabbedObjectId.current) {
+        const activeVels = lastVelocities.current;
+        const avgVel = activeVels.reduce((acc, v) => ({
+          x: acc.x + v.x,
+          y: acc.y + v.y
+        }), { x: 0, y: 0 });
+        const count = activeVels.length || 1;
+        const vel = { x: (avgVel.x / count) * 6, y: (avgVel.y / count) * 6 };
+        
+        socketRef.current?.emit('throw-physics-object', { id: grabbedObjectId.current, velocity: vel });
+        lastVelocities.current = [];
+        grabbedObjectId.current = null;
+      }
+
+      // Cleanup
+      isSwiping.current = false;
       setIsClicked(false);
       lastSwipeTick.current = 0;
       setChargeProgress(0);
       chargeStartTime.current = null;
       isCharged.current = false;
-
-      if (grabbedObjectId.current) {
-        const vel = mouseVelocity.current;
-        socketRef.current?.emit('throw-physics-object', { id: grabbedObjectId.current, velocity: vel });
-        grabbedObjectId.current = null;
-      }
-
-      if (isSwiping.current) {
-        const endPos = normalize({ x: e.clientX, y: e.clientY });
-        const vel = mouseVelocity.current.x + mouseVelocity.current.y;
-        
-        const fightsOpen = windowsRef.current.find(w => w.id === 'fights-exe')?.isOpen;
-        if (cursorModeRef.current === 'pointer' && (fightsOpen || isGameActiveRef.current) && vel > 45) { // Normalized velocity
-          socketRef.current?.emit('swipe-attack', { from: swipeStartPos.current, to: endPos });
-          // Final swipe burst damage
-          Object.entries(otherUsersRef.current).forEach(([id, user]) => {
-            const u = user as UserState;
-            const d = lineToPointDistance(swipeStartPos.current, endPos, { x: u.x, y: u.y });
-            if (d < 40) {
-              socketRef.current?.emit('damage-player', { targetId: id, damage: 5 });
-            }
-          });
-        }
-        isSwiping.current = false;
-      }
     };
 
     const handleWheel = (e: WheelEvent) => {
+      // Only switch during fights
+      const fightsOpen = windowsRef.current.find(w => w.id === 'fights-exe')?.isOpen;
+      const isCombatMode = fightsOpen || isGameActiveRef.current || currentServerRef.current === 'training';
+      
+      if (!isCombatMode) return;
+
+      // Ignore if scrolling inside a window 
+      const target = e.target as HTMLElement;
+      if (target.closest('.xp-window')) return;
+
       scrollAccumulator.current += e.deltaY;
       if (Math.abs(scrollAccumulator.current) > 120) {
         const direction = scrollAccumulator.current > 0 ? 1 : -1;
@@ -892,21 +1533,44 @@ export default function App() {
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Tab') {
-        e.preventDefault();
-        setCursorMode(prev => {
-          const modes: any[] = unlockedModes;
-          const idx = modes.indexOf(prev);
-          const next = modes[(idx + 1) % modes.length];
-          setShowModeSwitch(true);
-          setTimeout(() => setShowModeSwitch(false), 1000);
-          return next;
-        });
+        const fightsOpen = windowsRef.current.find(w => w.id === 'fights-exe')?.isOpen;
+        const isCombatMode = fightsOpen || isGameActiveRef.current || currentServerRef.current === 'training';
+        
+        if (isCombatMode) {
+          e.preventDefault();
+          setCursorMode(prev => {
+            const modes: any[] = unlockedModes;
+            const idx = modes.indexOf(prev);
+            const next = modes[(idx + 1) % modes.length];
+            setShowModeSwitch(true);
+            setTimeout(() => setShowModeSwitch(false), 1000);
+            return next;
+          });
+        }
       }
+    };
+
+    const handleTouchStart = (e: TouchEvent) => {
+      const touch = e.touches[0];
+      handleMouseDown({ clientX: touch.clientX, clientY: touch.clientY, button: 0, target: touch.target, preventDefault: () => {} } as any);
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      const touch = e.touches[0];
+      handleMouseMove({ clientX: touch.clientX, clientY: touch.clientY } as any);
+      if (e.cancelable) e.preventDefault();
+    };
+
+    const handleTouchEnd = (e: TouchEvent) => {
+      handleMouseUp({} as any);
     };
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mousedown', handleMouseDown);
     window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('touchstart', handleTouchStart, { passive: false });
+    window.addEventListener('touchmove', handleTouchMove, { passive: false });
+    window.addEventListener('touchend', handleTouchEnd, { passive: false });
     window.addEventListener('wheel', handleWheel);
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -915,12 +1579,16 @@ export default function App() {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mousedown', handleMouseDown);
       window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('touchstart', handleTouchStart);
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('touchend', handleTouchEnd);
       window.removeEventListener('wheel', handleWheel);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('contextmenu', (e) => e.preventDefault());
     };
   }, []); // Truly stable event handlers
   const shopItems = [
+    { id: 'lasso', name: 'Lasso.sh', price: 15, icon: 'https://img.icons8.com/pixel-serif/64/null/lasso.png', desc: 'Spin mouse to activate. Click to catch players for 5s' },
     { id: 'eraser', name: 'Recycle Bin', price: 20, icon: '/recycle-bin.png', desc: 'Deletes whatever it touches' },
     { id: 'hammer', name: 'Hammer.exe', price: 35, icon: 'https://img.icons8.com/pixel-serif/64/null/hammer.png', desc: 'Crushing damage' },
     { id: 'spray', name: 'Spray.dll', price: 50, icon: 'https://img.icons8.com/pixel-serif/64/null/paint-spray.png', desc: 'Damage over time' },
@@ -934,6 +1602,10 @@ export default function App() {
       if (!isTraining) setMoney(m => m - price);
       setUnlockedModes(prev => [...prev, itemId]);
     }
+  };
+
+  const lineDist = (p1: {x: number, y: number}, p2: {x: number, y: number}) => {
+    return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
   };
 
   const lineToPointDistance = (p1: {x: number, y: number}, p2: {x: number, y: number}, p3: {x: number, y: number}) => {
@@ -1051,27 +1723,98 @@ export default function App() {
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
+  const [isFullScreen, setIsFullScreen] = useState(false);
+  const [containerScale, setContainerScale] = useState(1);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (!containerRef.current) return;
+      const winW = window.innerWidth;
+      const winH = window.innerHeight;
+      
+      // Standard "PC" resolution we want to simulate
+      const targetW = 1200;
+      const targetH = 900; 
+      
+      const scaleW = winW / targetW;
+      const scaleH = winH / targetH;
+      
+      // Use the smaller scale to ensure it fits entirely
+      // But don't scale UP beyond 1 unless full screen
+      const newScale = Math.min(scaleW, scaleH);
+      setContainerScale(newScale > 1 ? 1 : newScale);
+    };
+
+    window.addEventListener('resize', handleResize);
+    handleResize(); // Initial call
+    
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    const handleFullScreenChange = () => {
+      setIsFullScreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullScreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullScreenChange);
+  }, []);
+
+  const toggleFullScreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(err => {
+        console.error(`Error attempting to enable full-screen mode: ${err.message} (${err.name})`);
+      });
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      }
+    }
+  };
+
   return (
-    <div className="h-screen w-screen bg-[#1a1a1a] flex items-center justify-center overflow-hidden p-4">
+    <div 
+      ref={containerRef}
+      className={`h-screen w-screen bg-[#1a1a1a] flex items-center justify-center overflow-hidden transition-all duration-300 ${isFullScreen ? 'p-0' : 'p-2 md:p-4'}`}
+    >
       <motion.div 
         initial={{ scale: 0.9, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        className="relative h-full max-h-[1080px] aspect-[4/3] bg-black shadow-[0_0_50px_rgba(0,0,0,0.8)] border-8 border-gray-900 rounded-lg overflow-hidden"
+        animate={{ 
+          scale: isFullScreen ? 1 : containerScale, 
+          opacity: 1,
+          width: isFullScreen ? '100vw' : '1200px',
+          height: isFullScreen ? '100vh' : '900px'
+        }}
+        transition={{ duration: 0.5, ease: "easeInOut" }}
+        className={`relative bg-black shadow-[0_0_50px_rgba(0,0,0,0.8)] ${isFullScreen ? 'border-0 rounded-none' : 'border-8 border-gray-900 rounded-xl'} overflow-hidden origin-center`}
       >
-        <div 
+        <motion.div 
           ref={desktopRef}
           id="desktop-canvas"
-          className="relative h-full w-full bg-[#3a6ea5] select-none font-sans overflow-hidden" 
+          className="relative h-full w-full bg-[#3a6ea5] select-none font-sans overflow-hidden touch-none"
+          animate={screenShake ? {
+             x: [0, -5, 5, -5, 5, 0],
+             y: [0, 5, -5, 5, -5, 0]
+          } : { x: 0, y: 0 }}
+          transition={{ duration: 0.2, ease: "linear" }}
         >
           {/* Windows XP Logo in background */}
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-20 pointer-events-none select-none">
             <img src="/windows-xp.webp" className="w-[60vw] max-w-[600px] object-contain" alt="Windows XP" onError={(e) => (e.target as any).style.display='none'} />
           </div>
+
+          {lassoState.targetId && otherUsers[lassoState.targetId === 'dummy-id' ? 'dummy-id' : lassoState.targetId] && (
+            <LassoRope 
+              from={denormalize(mousePos)} 
+              to={denormalize(lassoState.targetId === 'dummy-id' ? otherUsers['dummy-id'] : otherUsers[lassoState.targetId])} 
+            />
+          )}
         <AnimatePresence>
-          {isBooting && (
+          {isBooting ? (
             <motion.div 
+              key="boot"
               exit={{ opacity: 0 }}
-              className="absolute inset-0 z-[60] bg-black pointer-events-none flex flex-col items-center justify-center"
+              className="absolute inset-0 z-[1000] bg-black pointer-events-none flex flex-col items-center justify-center"
             >
               <div className="static-overlay opacity-40 animate-pulse" />
               <div className="w-64 h-2 bg-gray-800 rounded-full overflow-hidden border border-gray-600">
@@ -1084,7 +1827,69 @@ export default function App() {
               </div>
               <span className="text-white font-mono text-[10px] mt-4 tracking-widest opacity-50 uppercase">Initialising System...</span>
             </motion.div>
-          )}
+          ) : !currentUser ? (
+            <motion.div 
+              key="login"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 z-[900] bg-[#5a7edc] flex flex-col items-center justify-center overflow-hidden"
+            >
+              {/* Background gradient design like XP login */}
+              <div className="absolute inset-0 bg-gradient-to-b from-[#1a44a1] via-[#5a7edc] to-[#1a44a1] opacity-50" />
+              <div className="absolute top-0 left-0 w-full h-[50%] bg-gradient-to-b from-[#00000044] to-transparent" />
+              <div className="absolute bottom-0 left-0 w-full h-[50%] bg-gradient-to-t from-[#00000044] to-transparent" />
+              
+              <div className="relative z-10 w-full max-w-4xl flex items-center">
+                 <div className="flex-1 flex flex-col items-end pr-10 border-r-2 border-white/20 py-10">
+                    <div className="flex items-center gap-4 mb-4">
+                       <img src="/XPIcon.webp" className="w-24 h-24 pixelated drop-shadow-xl" alt="XP" />
+                    </div>
+                    <h1 className="text-white text-4xl font-light tracking-tight italic">Windows <span className="font-bold not-italic">XP</span></h1>
+                    <p className="text-white/60 text-sm mt-2">Professional Edition</p>
+                 </div>
+                 
+                 <div className="flex-1 pl-10 flex flex-col gap-6">
+                    <h2 className="text-white text-xl mb-4">To begin, click your user name</h2>
+                    
+                    <button 
+                      onClick={handleLogin}
+                      className="group flex items-center gap-4 p-2 rounded-lg hover:bg-white/10 transition-all text-left"
+                    >
+                       <div className="w-16 h-16 rounded border-2 border-white bg-blue-400 overflow-hidden shadow-lg group-hover:scale-105 transition-transform">
+                          <User className="w-full h-full text-white/50 p-2" />
+                       </div>
+                       <div>
+                          <p className="text-white text-2xl font-medium group-hover:text-amber-400 transition-colors">Login with Google</p>
+                          <p className="text-white/60 text-sm">Save your data & money</p>
+                       </div>
+                    </button>
+
+                    <button 
+                      onClick={() => setCurrentUser({ displayName: 'Guest', uid: 'guest-' + Math.random() } as any)}
+                      className="group flex items-center gap-4 p-2 rounded-lg hover:bg-white/10 transition-all text-left opacity-60 hover:opacity-100"
+                    >
+                       <div className="w-12 h-12 rounded border border-white/50 bg-gray-400 overflow-hidden group-hover:scale-105 transition-transform">
+                          <LogIn className="w-full h-full text-white/50 p-2" />
+                       </div>
+                       <div>
+                          <p className="text-white text-lg font-medium group-hover:text-blue-200">Play as Guest</p>
+                          <p className="text-white/40 text-[10px]">Data will not be saved</p>
+                       </div>
+                    </button>
+                 </div>
+              </div>
+
+              <div className="absolute bottom-10 left-10 flex flex-col gap-4">
+                 <button className="flex items-center gap-2 text-white/60 hover:text-white transition-colors">
+                    <div className="w-8 h-8 rounded-full bg-red-600 flex items-center justify-center border border-white/20">
+                       <Monitor size={16} />
+                    </div>
+                    <span className="text-sm">Turn off computer</span>
+                 </button>
+              </div>
+            </motion.div>
+          ) : null}
         </AnimatePresence>
 
         {/* Static noise that fades out */}
@@ -1137,6 +1942,42 @@ export default function App() {
           ))}
         </AnimatePresence>
 
+        {/* Lasso Layer */}
+        {cursorMode === 'lasso' && lassoState.active && (
+          <div className="absolute inset-0 pointer-events-none z-[16] overflow-hidden">
+             <svg className="w-full h-full" viewBox="0 0 1000 1000" preserveAspectRatio="none">
+                <motion.path
+                  d={(() => {
+                    const radius = 60;
+                    const segments = 20;
+                    const points = [];
+                    for(let i = 0; i <= segments; i++) {
+                      const angle = (i / segments) * Math.PI * 2 + (lassoState.swingAngle * Math.PI / 180);
+                      const x = mousePos.x + Math.cos(angle) * (lassoState.fired ? 200 * (Math.min(1, (Date.now() - lassoState.startTime)/500)) : radius);
+                      const y = mousePos.y + Math.sin(angle) * (lassoState.fired ? 200 * (Math.min(1, (Date.now() - lassoState.startTime)/500)) : radius);
+                      points.push(`${x},${y}`);
+                    }
+                    // Add line from mouse to loop
+                    return `M ${mousePos.x},${mousePos.y} L ${points[0]} M ${points.join(' L ')}`;
+                  })()}
+                  stroke="#8b4513"
+                  strokeWidth="4"
+                  fill="none"
+                  strokeLinecap="round"
+                />
+                {lassoState.fired && lassoState.targetId && otherUsers[lassoState.targetId] && (
+                   <line 
+                     x1={mousePos.x} y1={mousePos.y} 
+                     x2={otherUsers[lassoState.targetId].x} y2={otherUsers[lassoState.targetId].y} 
+                     stroke="#8b4513" 
+                     strokeWidth="4"
+                     strokeDasharray="10 5"
+                   />
+                )}
+             </svg>
+          </div>
+        )}
+
         {/* Global Swipes Visualizer */}
         <div className="absolute inset-0 pointer-events-none z-[100]">
           <svg className="w-full h-full overflow-visible" viewBox="0 0 1000 1000" preserveAspectRatio="none">
@@ -1166,11 +2007,22 @@ export default function App() {
                   stroke={swipe.color || (swipe.attackerId === socketRef.current?.id ? "white" : "#ff3333")}
                   strokeWidth={swipe.color === '#facc15' ? "20" : "12"}
                   strokeLinecap="round"
-                  initial={{ opacity: 1, pathLength: 0 }}
-                  animate={{ opacity: 0, pathLength: 1 }}
+                  initial={{ opacity: 1, boxShadow: '0 0 20px white' }}
+                  animate={{ opacity: 0, scaleY: 0.5 }}
                   exit={{ opacity: 0 }}
-                  transition={{ duration: 0.8, ease: "easeOut" }}
-                  style={{ filter: swipe.color === '#facc15' ? 'url(#charged-glow)' : 'url(#glow)' }}
+                  transition={{ duration: 0.3 }}
+                />
+              ))}
+              {hitSparks.map(spark => (
+                <motion.circle
+                  key={spark.id}
+                  cx={spark.x}
+                  cy={spark.y}
+                  r={10}
+                  fill="#ffdb4d"
+                  initial={{ scale: 0, opacity: 1 }}
+                  animate={{ scale: [1, 2, 0], opacity: 0 }}
+                  transition={{ duration: 0.4 }}
                 />
               ))}
             </AnimatePresence>
@@ -1200,8 +2052,8 @@ export default function App() {
         />
 
         {/* Physics Objects Layer */}
-        <div className="absolute inset-0 pointer-events-none z-[15]">
-          <svg className="w-full h-full overflow-visible" viewBox="0 0 1000 1000" preserveAspectRatio="none">
+        <div className="absolute inset-0 pointer-events-none z-[15] overflow-hidden">
+          <svg className="w-full h-full" viewBox="0 0 1000 1000" preserveAspectRatio="none">
             {currentDrawing.length > 1 && (
               <polyline
                 points={currentDrawing.map(p => `${p.x},${p.y}`).join(' ')}
@@ -1276,7 +2128,7 @@ export default function App() {
           <DesktopIcon 
             icon={<img src="/recycle-bin.png" className="w-8 h-8 pixelated" alt="Recycle Bin" onError={(e) => (e.target as any).src="https://img.icons8.com/color/48/000000/recycle-bin.png"} />} 
             label="Recycle Bin" 
-            onClick={() => {}}
+            onClick={() => toggleWindow('explorer-exe', true)}
           />
           <DesktopIcon 
             icon={<img src="https://img.icons8.com/plasticine/100/shopping-cart.png" className="w-8 h-8" alt="Shop" />} 
@@ -1358,6 +2210,8 @@ export default function App() {
                     {window.id === 'my-computer' && <Monitor size={14} className="pixel-icon" />}
                     {window.id === 'server-join' && <Link size={14} className="pixel-icon" />}
                     {window.id === 'fights-exe' && <Swords size={14} className="pixel-icon" />}
+                    {window.id === 'explorer-exe' && <Folder size={14} className="pixel-icon" />}
+                    {window.id === 'browser-exe' && <Chrome size={14} className="pixel-icon" />}
                     <span>{window.title} {window.draggedBy && window.draggedBy !== socketRef.current?.id && "(DRAGGED BY OTHER)"}</span>
                   </div>
                   <div className="xp-window-controls" onPointerDown={(e) => e.stopPropagation()}>
@@ -1377,11 +2231,68 @@ export default function App() {
                 </div>
                 
                 <div className="flex-1 p-4 bg-white m-0.5 overflow-auto border-t border-gray-400 relative">
+                  {window.id === 'browser-exe' && (
+                    <div className="flex flex-col h-full">
+                       <div className="flex items-center gap-2 bg-[#ece9d8] p-1 border-b border-gray-400">
+                          <div className="flex gap-1">
+                             <button className="w-6 h-6 border border-gray-400 flex items-center justify-center opacity-50"><Link size={12} /></button>
+                             <button className="w-6 h-6 border border-gray-400 flex items-center justify-center opacity-50"><Link size={12} className="rotate-180" /></button>
+                          </div>
+                          <div className="flex-1 bg-white border border-gray-400 px-2 py-0.5 text-[10px] flex items-center gap-2">
+                             <Chrome size={10} className="text-blue-500" />
+                             <span>http://www.google.com</span>
+                          </div>
+                       </div>
+                       <div className="flex-1 bg-white flex flex-col items-center justify-center p-8">
+                          <img src="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png" className="w-48 mb-8" alt="Google" />
+                          <div className="w-full max-w-sm">
+                             <div className="flex gap-2 mb-4">
+                               <input type="text" className="flex-1 border border-gray-400 p-1.5 shadow-inner" />
+                               <button className="bg-[#f2f2f2] border border-gray-300 px-4 py-1 text-xs hover:border-gray-400">Google Search</button>
+                             </div>
+                             <div className="flex items-center justify-center gap-4 text-[11px] text-blue-700 underline">
+                                <span>Images</span>
+                                <span>Maps</span>
+                                <span>News</span>
+                                <span>Gmail</span>
+                             </div>
+                          </div>
+                       </div>
+                    </div>
+                  )}
+
+                  {window.id === 'explorer-exe' && (
+                    <div className="flex flex-col h-full bg-[#f1f1f1]">
+                      <div className="flex gap-4 p-2 border-b border-white bg-gradient-to-r from-blue-100 to-blue-50">
+                        <div className="flex flex-col items-center gap-1 group cursor-pointer" onClick={() => {}}>
+                           <Folder className="text-yellow-500 fill-yellow-200" size={32} />
+                           <span className="text-[10px]">Folder</span>
+                        </div>
+                        <div className="flex flex-col items-center gap-1 group cursor-pointer" onClick={() => {}}>
+                           <HardDrive className="text-gray-500" size={32} />
+                           <span className="text-[10px]">Disk C:</span>
+                        </div>
+                        <div className="flex flex-col items-center gap-1 group cursor-pointer" onClick={() => {}}>
+                           <Info className="text-blue-500" size={32} />
+                           <span className="text-[10px]">README.txt</span>
+                        </div>
+                      </div>
+                      <div className="p-4 grid grid-cols-5 gap-4">
+                        {[1,2,3,4,5,6].map(i => (
+                          <div key={i} className="flex flex-col items-center gap-1 hover:bg-blue-100 p-2 rounded cursor-pointer group">
+                             <Folder className="text-yellow-400 fill-yellow-100 group-hover:scale-105 transition-transform" size={40} />
+                             <span className="text-[10px] text-center line-clamp-1">New Folder ({i})</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {window.id === 'shop-exe' ? (
                     <div className="p-4 bg-gray-100 h-full flex flex-col gap-4 overflow-auto">
                       <div className="bg-white border-2 border-blue-400 p-3 rounded shadow-inner mb-2">
                         <p className="font-bold text-blue-800 text-lg">
-                          BALANCE: {currentServerRef.current === 'training' ? "∞ (TRAINING)" : `$${money}`}
+                          BALANCE: ${money}
                         </p>
                       </div>
                       <div className="grid grid-cols-1 gap-2">
@@ -1417,42 +2328,76 @@ export default function App() {
                   )}
 
                   {window.id === 'server-join' && (
-                    <div className="flex flex-col gap-4">
-                      {/* ... (Existing join content) */}
+                    <div className="flex flex-col gap-4 p-4 bg-[#ece9d8]">
+                      <div className="text-[11px] leading-tight text-gray-700 bg-white/50 p-2 border border-blue-200">
+                        <b>XP WORLD PERSISTENCE:</b> Your username is saved to your browser. You can change it below.
+                      </div>
+                      
                       <div>
-                        <label className="text-xs font-bold block mb-1 uppercase tracking-tight">Your Name:</label>
+                        <label className="text-[10px] font-bold block mb-1 uppercase tracking-tight text-gray-600">Identity:</label>
                         <div className="flex gap-2 items-center">
-                          <User size={16} className="text-gray-500" />
+                          <User size={16} className="text-[#0054e3]" />
                           <input 
                             type="text" 
-                            value={usernameInput || username}
-                            onChange={(e) => setUsernameInput(e.target.value)}
-                            placeholder="Type username..."
+                            value={usernameInput}
+                            onChange={(e) => setUsernameInput(e.target.value.slice(0, 15))}
+                            placeholder="Your name..."
                             className="flex-1 border-2 border-gray-400 p-1 px-2 text-sm focus:outline-none focus:border-blue-600 bg-white"
                           />
                         </div>
                       </div>
 
                       <div>
-                        <label className="text-xs font-bold block mb-1 uppercase tracking-tight">Room ID:</label>
+                        <label className="text-[10px] font-bold block mb-1 uppercase tracking-tight text-gray-600">Server Instance:</label>
                         <div className="flex gap-2">
                           <input 
                             type="text" 
                             value={serverInput}
                             onChange={(e) => setServerInput(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && handleJoinServer(serverInput, usernameInput)}
-                            placeholder="e.g. coolest-room"
+                            placeholder="e.g. public"
                             className="flex-1 border-2 border-gray-400 p-1 px-2 text-sm focus:outline-none focus:border-blue-600 bg-white"
                           />
                         </div>
+                        <div className="flex gap-1 mt-1">
+                          {['public', 'training'].map(srv => (
+                            <button 
+                              key={srv}
+                              onClick={() => setServerInput(srv)}
+                              className="px-2 py-0.5 text-[9px] bg-white border border-gray-400 hover:bg-gray-100 uppercase"
+                            >
+                              {srv}
+                            </button>
+                          ))}
+                        </div>
                       </div>
 
-                      <button 
-                        onClick={() => handleJoinServer(serverInput, usernameInput)}
-                        className="bg-[#ece9d8] border-2 border-gray-600 px-4 py-2 text-sm font-bold active:border-white active:bg-gray-400 shadow-[inset_-1px_-1px_1px_rgba(0,0,0,0.5)] self-end"
-                      >
-                        Sync & Connect
-                      </button>
+                      <div className="flex justify-between items-center mt-2 border-t border-gray-300 pt-3">
+                         <div className="flex flex-col">
+                           <span className="text-[9px] uppercase font-bold text-gray-500">Player Status</span>
+                           <span className={`text-[10px] ${isConnected ? 'text-green-600' : 'text-red-500'} font-bold`}>
+                             {isConnected ? '• CONNECTED' : '• DISCONNECTED'}
+                           </span>
+                         </div>
+                         <div className="flex gap-2">
+                            {isConnected && (
+                              <button 
+                                onClick={() => {
+                                  socketRef.current?.disconnect();
+                                  setIsConnected(false);
+                                }}
+                                className="bg-red-50 border-2 border-red-600 px-3 py-1 text-[10px] font-bold text-red-700 hover:bg-red-100 shadow-[inset_-1px_-1px_1px_rgba(0,0,0,0.1)]"
+                              >
+                                DISCONNECT
+                              </button>
+                            )}
+                            <button 
+                              onClick={() => handleJoinServer(serverInput, usernameInput)}
+                              className="bg-[#3fb03f] border-2 border-[#1b4b1b] px-4 py-1 text-white text-[11px] font-bold hover:bg-[#48c948] shadow-[inset_-1px_-1px_1px_rgba(0,0,0,0.3)] active:shadow-none"
+                            >
+                              SYNC & JOIN
+                            </button>
+                         </div>
+                      </div>
                     </div>
                   )}
 
@@ -1484,6 +2429,7 @@ export default function App() {
                           <PlayerRow 
                             name={username + " (YOU)"} 
                             health={health} 
+                            stamina={stamina}
                             isReady={isReady} 
                             onReady={() => socketRef.current?.emit('player-ready', !isReady)}
                             isSelf={true}
@@ -1560,6 +2506,13 @@ export default function App() {
           <div className="flex-1 flex px-2 gap-1 overflow-hidden" />
 
           <div className="xp-taskbar bg-[#0996f1] h-full flex items-center px-4 border-l border-[#0877c1] text-white text-xs drop-shadow gap-2">
+            <button 
+              onClick={toggleFullScreen}
+              className="flex items-center gap-2 hover:bg-white/20 p-1 rounded transition-colors cursor-none"
+              title={isFullScreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+            >
+              {isFullScreen ? <Minimize size={14} /> : <Maximize size={14} />}
+            </button>
             <div className="flex items-center gap-2">
               <Chrome size={14} />
               <Monitor size={14} />
@@ -1584,13 +2537,25 @@ export default function App() {
               </div>
               <div className="flex h-[calc(100%-116px)]">
                 <div className="w-1/2 p-2 border-r border-blue-100 flex flex-col gap-1">
-                  <div className="flex items-center gap-2 p-1 hover:bg-blue-600 hover:text-white cursor-pointer rounded group">
+                  <div 
+                    onClick={() => {
+                      toggleWindow('browser-exe', true);
+                      setIsStartOpen(false);
+                    }}
+                    className="flex items-center gap-2 p-1 hover:bg-blue-600 hover:text-white cursor-pointer rounded group"
+                  >
                     <Chrome size={20} className="text-blue-500 group-hover:text-white" />
                     <span className="text-xs">Internet Explorer</span>
                   </div>
-                  <div className="flex items-center gap-2 p-1 hover:bg-blue-600 hover:text-white cursor-pointer rounded group">
+                  <div 
+                    onClick={() => {
+                      toggleWindow('explorer-exe', true);
+                      setIsStartOpen(false);
+                    }}
+                    className="flex items-center gap-2 p-1 hover:bg-blue-600 hover:text-white cursor-pointer rounded group"
+                  >
                     <Folder size={20} className="text-yellow-500 group-hover:text-white" />
-                    <span className="text-xs">E-mail</span>
+                    <span className="text-xs">File Explorer</span>
                   </div>
                   
                   <div className="border-t border-gray-200 my-1" />
@@ -1617,11 +2582,20 @@ export default function App() {
                 </div>
               </div>
               <div className="h-10 bg-[#245edb] flex items-center justify-end px-4 gap-4">
-                <button className="text-white text-xs flex items-center gap-1 hover:underline">
+                <button 
+                  onClick={() => {
+                    handleLogout();
+                    setIsStartOpen(false);
+                  }}
+                  className="text-white text-xs flex items-center gap-1 hover:underline"
+                >
                   <div className="w-4 h-4 bg-orange-500 rounded flex items-center justify-center font-bold">L</div>
                   Log Off
                 </button>
-                <button className="text-white text-xs flex items-center gap-1 hover:underline">
+                <button 
+                   onClick={() => setIsBooting(true)}
+                   className="text-white text-xs flex items-center gap-1 hover:underline"
+                >
                   <div className="w-4 h-4 bg-red-600 rounded flex items-center justify-center font-bold">T</div>
                   Turn Off Computer
                 </button>
@@ -1634,13 +2608,42 @@ export default function App() {
         <div 
           className="custom-cursor pointer-events-none"
           style={{ 
-            left: uiMousePos.x,
-            top: uiMousePos.y,
+            left: `${uiMousePos.x}%`,
+            top: `${uiMousePos.y}%`,
             zIndex: 10000,
             transform: 'translate(-2px, -2px)'
           }}
         >
-          <CustomCursorIcon isClicked={isClicked} mode={cursorMode} chargeProgress={chargeProgress} color={health <= 0 ? "#555" : (isGameActive ? "#60a5fa" : "white")} />
+          <CustomCursorIcon 
+            isClicked={isClicked} 
+            mode={cursorMode} 
+            chargeProgress={chargeProgress} 
+            isLassoActive={lassoState.active} 
+            lassoAngle={lassoState.swingAngle}
+            color={health <= 0 ? "#555" : (isGameActive ? "#60a5fa" : "white")} 
+          />
+
+          {/* Local Name Label */}
+          <div className="absolute top-10 left-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-none">
+            <div className="bg-[#245edb] text-white text-[9px] px-2 py-0.5 border border-white/40 shadow-md whitespace-nowrap mb-1">
+              {username} (YOU)
+            </div>
+          </div>
+
+          {/* Floating Stamina Bar */}
+          {stamina < 100 && (windows.find(w => w.id === 'fights-exe')?.isOpen || isGameActive || currentServer === 'training') && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute left-1/2 -bottom-4 -translate-x-1/2 w-10 h-1.5 bg-black/40 border border-white/50 rounded-full overflow-hidden"
+            >
+              <div 
+                className={`h-full transition-all duration-100 ${stamina < 25 ? 'bg-red-500' : 'bg-blue-400'}`}
+                style={{ width: `${stamina}%` }}
+              />
+            </motion.div>
+          )}
           
           <AnimatePresence>
             {isAutoclicker && (
@@ -1662,20 +2665,20 @@ export default function App() {
             {showModeSwitch && (
               <motion.div 
                 initial={{ opacity: 0, scale: 0.5, y: -60 }}
-                animate={{ opacity: 1, scale: 1, y: -160 }}
-                exit={{ opacity: 0, scale: 0.8, y: -180 }}
+                animate={{ opacity: 1, scale: 0.8, y: -140 }}
+                exit={{ opacity: 0, scale: 0.6, y: -160 }}
                 className="absolute left-1/2 -translate-x-1/2 pointer-events-none"
               >
-                <div className="bg-[#ccc] border-[2px] border-t-white border-l-white border-b-gray-800 border-r-gray-800 p-1 shadow-2xl flex flex-col items-center min-w-[70px]">
-                  <div className="bg-[#000080] text-white text-[7px] px-2 py-0.5 w-full text-center uppercase font-bold mb-1 border-b border-black">
+                <div className="bg-[#ccc] border-[2px] border-t-white border-l-white border-b-gray-800 border-r-gray-800 p-1 shadow-2xl flex flex-col items-center min-w-[60px]">
+                  <div className="bg-[#000080] text-white text-[6px] px-2 py-0.5 w-full text-center uppercase font-bold mb-1 border-b border-black">
                     {cursorMode}
                   </div>
-                  <div className="relative w-10 h-10 bg-white border-2 border-gray-500 flex items-center justify-center overflow-hidden shadow-inner">
+                  <div className="relative w-8 h-8 bg-white border-2 border-gray-500 flex items-center justify-center overflow-hidden shadow-inner">
                     <motion.div
                       key={cursorMode}
                       initial={{ y: 15, opacity: 0 }}
                       animate={{ y: 0, opacity: 1 }}
-                      transition={{ type: "spring", stiffness: 400, damping: 25 }}
+                      transition={{ type: "spring", stiffness: 400, damping: 30 }}
                     >
                       <img 
                         src={
@@ -1687,7 +2690,7 @@ export default function App() {
                           cursorMode === 'stamp' ? 'https://img.icons8.com/pixel-serif/64/null/stamp.png' :
                           'https://img.icons8.com/pixel-serif/64/null/pencil.png'
                         }
-                        className="w-8 h-8 object-contain pixelated"
+                        className="w-6 h-6 object-contain pixelated"
                         alt={cursorMode}
                       />
                     </motion.div>
@@ -1728,38 +2731,44 @@ export default function App() {
               className="custom-cursor pointer-events-none"
               animate={{ 
                 left: `${(u.x / 1000) * 100}%`,
-                top: `${(u.y / 1000) * 100}%`
+                top: `${(u.y / 1000) * 100}%`,
+                rotate: u.isRagdoll ? [0, 90, 180, 270, 360] : 0,
+                scale: u.isRagdoll ? 1.2 : 1
               }}
-              transition={{ duration: 0.05, ease: "linear" }}
+              transition={{ 
+                left: { duration: 0.1, ease: "linear" },
+                top: { duration: 0.1, ease: "linear" },
+                rotate: u.isRagdoll ? { repeat: Infinity, duration: 0.3, ease: "linear" } : { duration: 0.2 },
+                scale: { duration: 0.2 }
+              }}
               style={{ zIndex: 9000 }}
             >
-              <CustomCursorIcon mode={(user as UserState).cursorMode} color={(user as UserState).health <= 0 ? "#555" : "#ff6b6b"} />
-              <div className="absolute top-8 left-4 flex flex-col gap-0.5 min-w-[64px]">
-                <div className="bg-black/70 text-white text-[10px] px-1.5 py-0.5 rounded-sm whitespace-nowrap border border-white/20 mb-0.5">
-                  {(user as UserState).username} {(user as UserState).isReady && "✓"}
-                </div>
-                {(isGameActive || (user as UserState).health < 100) && (
-                  <div className="flex flex-col gap-1 items-start w-[64px]">
-                    <div className="w-16 h-2 flex-shrink-0 bg-gray-900 border-2 border-black relative overflow-hidden shadow-[2px_2px_0_rgba(0,0,0,1)]">
-                      <motion.div 
-                        animate={{ width: `${(user as UserState).health}%` }}
-                        className="h-full bg-red-600 opacity-50 absolute inset-0"
-                        transition={{ duration: 1.5, ease: "linear" }}
-                      />
-                      <motion.div 
-                        animate={{ width: `${(user as UserState).health}%` }}
-                        className="h-full bg-red-500 absolute inset-0"
-                        transition={{ duration: 0.1 }}
-                      />
-                    </div>
-                    <span className="pixel-text text-[6px] text-white bg-black/50 px-1 border border-white/20 whitespace-nowrap drop-shadow-[0_1px_0_rgba(0,0,0,1)]">{(user as UserState).health} HP</span>
-                  </div>
-                )}
+              <div className={u.isRagdoll ? 'blur-[1px] opacity-80' : ''}>
+                 <CustomCursorIcon mode={u.cursorMode} color={u.health <= 0 ? "#555" : "#ff6b6b"} />
               </div>
+                <div className="absolute top-10 left-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-none">
+                  <div className="bg-[#FFFFE1] text-black text-[9px] px-2 py-0.5 border border-black shadow-[2px_2px_0_rgba(0,0,0,0.2)] whitespace-nowrap mb-1">
+                    {u.username} {u.isReady && "✓"}
+                  </div>
+                  {(isGameActive || u.health < 100) && (
+                    <div className="flex flex-col items-center">
+                      <div className="w-12 h-1.5 bg-gray-900 border border-black overflow-hidden relative">
+                        <motion.div 
+                          animate={{ width: `${u.health}%` }}
+                          className="h-full bg-red-500 absolute inset-0"
+                          transition={{ duration: 0.1 }}
+                        />
+                      </div>
+                      <span className="text-[6px] text-white bg-black/50 px-1 mt-0.5 border border-white/20">
+                        {u.health}HP
+                      </span>
+                    </div>
+                  )}
+                </div>
             </motion.div>
           );
         })}
-        </div>
+        </motion.div>
       </motion.div>
     </div>
   );

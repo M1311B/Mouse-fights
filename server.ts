@@ -215,13 +215,19 @@ async function startServer() {
       io.to(currentRoom).emit("user-ready-changed", { id: socket.id, isReady });
     });
 
-    socket.on("damage-player", ({ targetId, damage }) => {
+    socket.on("damage-player", ({ targetId, damage, effects }) => {
       if (!currentRoom || !rooms[currentRoom] || !rooms[currentRoom].users[targetId]) return;
-      rooms[currentRoom].users[targetId].health = Math.max(0, rooms[currentRoom].users[targetId].health - damage);
-      io.to(currentRoom).emit("user-health-changed", { id: targetId, health: rooms[currentRoom].users[targetId].health });
+      const room = rooms[currentRoom];
+      room.users[targetId].health = Math.max(0, room.users[targetId].health - damage);
+      io.to(currentRoom).emit("user-health-changed", { id: targetId, health: room.users[targetId].health });
+
+      if (effects && effects.length > 0) {
+        effects.forEach((effect: string) => {
+           io.to(currentRoom!).emit("user-effect", { userId: targetId, effect, duration: 3000 });
+        });
+      }
 
       // Check for win condition: only one player with health > 0
-      const room = rooms[currentRoom];
       const players = Object.entries(room.users);
       const alivePlayers = players.filter(([id, u]) => u.health > 0);
       
@@ -229,6 +235,11 @@ async function startServer() {
         const [winnerId, winner] = alivePlayers[0];
         io.to(currentRoom).emit("game-over", { winnerId, winnerName: winner.username });
       }
+    });
+
+    socket.on("user-effect", ({ userId, effect, duration }) => {
+      if (!currentRoom) return;
+      io.to(currentRoom).emit("user-effect", { userId, effect, duration });
     });
 
     socket.on("swipe-attack", ({ from, to }) => {
@@ -243,6 +254,13 @@ async function startServer() {
         rooms[currentRoom].users[id].isReady = false;
       });
       io.to(currentRoom).emit("game-reset", rooms[currentRoom].users);
+    });
+
+    socket.on("force-move", ({ targetId, pos }) => {
+      if (!currentRoom || !rooms[currentRoom] || !rooms[currentRoom].users[targetId]) return;
+      rooms[currentRoom].users[targetId].x = pos.x;
+      rooms[currentRoom].users[targetId].y = pos.y;
+      io.to(currentRoom).emit("user-moved", { id: targetId, pos });
     });
 
     socket.on("disconnect", () => {
