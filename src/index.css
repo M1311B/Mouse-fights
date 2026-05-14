@@ -9,8 +9,17 @@
   cursor: none !important; /* Force hide everywhere */
 }
 
+html, body {
+  overflow: hidden;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: #1a1a1a;
+}
+
 * {
   cursor: none !important; /* Force hide on all elements */
+  -webkit-tap-highlight-color: transparent;
 }
 
 .pixel-text {

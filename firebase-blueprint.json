@@ -16,12 +16,31 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["username", "email", "money", "unlockedModes"]
+    },
+    "RoomPresence": {
+      "title": "Room Presence",
+      "description": "Real-time user presence in a room",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "username": { "type": "string" },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "health": { "type": "number" },
+        "isReady": { "type": "boolean" },
+        "cursorMode": { "type": "string" },
+        "lastActive": { "type": "string", "format": "date-time" }
+      }
     }
   },
   "firestore": {
     "users/{userId}": {
       "schema": "User",
       "description": "Store individual user information"
+    },
+    "rooms/{roomId}/presences/{userId}": {
+      "schema": "RoomPresence",
+      "description": "Real-time presence data for room synchronization across regions"
     }
   }
 }

@@ -5,9 +5,9 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence, useAnimation } from 'motion/react';
-import { Monitor, Trash2, Folder, HardDrive, Chrome, X, Minimize2, Maximize, Minimize, Square, Link, Info, User, Shield, Swords, Zap, Activity, Lock, Pencil, LogIn, LogOut } from 'lucide-react';
+import { Monitor, Trash2, Folder, HardDrive, Chrome, X, Minimize2, Maximize, Minimize, Square, Link, Info, User, Shield, Swords, Zap, Activity, Lock, Pencil, LogIn, LogOut, AlertTriangle } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
-import { auth, db, googleProvider, doc, getDoc, setDoc, updateDoc, onSnapshot, signInWithPopup } from './firebase';
+import { auth, db, googleProvider, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, signInWithPopup } from './firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 
 enum OperationType {
@@ -57,6 +57,19 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
   throw new Error(JSON.stringify(errInfo));
 }
 
+const isPointInPoly = (p: {x: number, y: number}, poly: {x: number, y: number}[]) => {
+  if (poly.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y;
+    const xj = poly[j].x, yj = poly[j].y;
+    const intersect = ((yi > p.y) !== (yj > p.y)) &&
+        (p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+};
+
 // Custom Mouse Cursor SVG with Click Effect
 const CustomCursorIcon = ({ color = 'white', isClicked = false, mode = 'pointer', chargeProgress = 0, isLassoActive = false, lassoAngle = 0 }: { color?: string, isClicked?: boolean, mode?: string, chargeProgress?: number, isLassoActive?: boolean, lassoAngle?: number }) => {
   const getIcon = () => {
@@ -68,7 +81,11 @@ const CustomCursorIcon = ({ color = 'white', isClicked = false, mode = 'pointer'
       case 'bucket': return 'https://img.icons8.com/pixel-serif/64/null/paint-bucket.png';
       case 'stamp': return 'https://img.icons8.com/pixel-serif/64/null/stamp.png';
       case 'lasso': return '/Lasso head.png';
-      default: return null;
+      default: {
+        if (mode.includes('bsod')) return '/BSOD.png';
+        if (mode.includes('storm')) return 'https://img.icons8.com/color/96/commercial.png';
+        return null;
+      }
     }
   };
 
@@ -149,48 +166,65 @@ const CustomCursorIcon = ({ color = 'white', isClicked = false, mode = 'pointer'
 };
 
 // Rope component for lasso
-const LassoRope = ({ from, to }: { from: { x: number, y: number }, to: { x: number, y: number } }) => {
+const LassoRope = ({ from, to }: { from: { x: number, y: number }, to: { x: number, y: number }, key?: string | number }) => {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const dist = Math.sqrt(dx * dx + dy * dy);
   
   // Create a springy/wavy path for the rope
-  const segments = 10;
-  let pathD = `M ${from.x} ${from.y}`;
+  const segments = 16;
+  const pathPoints = [];
   
-  for (let i = 1; i <= segments; i++) {
+  for (let i = 0; i <= segments; i++) {
     const t = i / segments;
     const px = from.x + dx * t;
     const py = from.y + dy * t;
     
-    // Add some "sine" wave/sag based on distance
-    const wave = Math.sin(t * Math.PI) * (dist / 8);
-    const perpX = -(to.y - from.y) / dist;
-    const perpY = (to.x - from.x) / dist;
+    // Wave complexity
+    const waveFreq = dist > 200 ? 2 : 1;
+    const waveSpeed = Date.now() / 150;
+    const waveAmp = Math.sin(t * Math.PI) * (dist / 15);
+    const wave = Math.sin(t * Math.PI * waveFreq + waveSpeed) * waveAmp * 0.3;
     
-    const finalX = px + (perpX * wave * 0.2);
-    const finalY = py + (perpY * wave * 0.2) + (Math.sin(t * Math.PI) * 50); // Gravity sag
+    const perpX = -dy / (dist || 1);
+    const perpY = dx / (dist || 1);
     
-    pathD += ` L ${finalX} ${finalY}`;
+    // Subtle gravity sag (more sag in middle)
+    const sag = Math.sin(t * Math.PI) * (dist / 5);
+    
+    pathPoints.push({
+      x: px + (perpX * wave),
+      y: py + (perpY * wave) + sag
+    });
   }
 
+  const pathD = `M ${pathPoints[0].x} ${pathPoints[0].y} ` + 
+                pathPoints.slice(1).map(p => `L ${p.x} ${p.y}`).join(' ');
+
   return (
-    <svg className="absolute inset-0 w-full h-full pointer-events-none z-[5000]" style={{ filter: 'drop-shadow(0 2px 2px rgba(0,0,0,0.5))' }}>
-      <path 
-        d={pathD} 
-        fill="none" 
-        stroke="#d97706" 
-        strokeWidth="4" 
-        strokeLinecap="round"
-        className="opacity-90"
-      />
-      <path 
+    <svg 
+      className="absolute inset-0 w-full h-full pointer-events-none z-[5000]" 
+      viewBox="0 0 1000 1000" 
+      preserveAspectRatio="none"
+      style={{ filter: 'drop-shadow(0 2px 3px rgba(0,0,0,0.4))' }}
+    >
+      <motion.path 
         d={pathD} 
         fill="none" 
         stroke="#78350f" 
-        strokeWidth="2" 
-        strokeDasharray="2 4"
+        strokeWidth="10" 
+        strokeLinecap="round"
         className="opacity-50"
+      />
+      <motion.path 
+        d={pathD} 
+        fill="none" 
+        stroke="#d97706" 
+        strokeWidth="5" 
+        strokeLinecap="round"
+        initial={{ pathLength: 0, opacity: 0 }}
+        animate={{ pathLength: 1, opacity: 1 }}
+        className="opacity-90"
       />
     </svg>
   );
@@ -323,13 +357,15 @@ export default function App() {
   const [uiMousePos, setUiMousePos] = useState({ x: 0, y: 0 });
   const [isClicked, setIsClicked] = useState(false);
   const [otherUsers, setOtherUsers] = useState<Record<string, UserState>>({});
+  const presenceSyncRef = useRef<Record<string, number>>({});
   const [health, setHealth] = useState(100);
   const [stamina, setStamina] = useState(100);
   const [lastSwipeTime, setLastSwipeTime] = useState(0);
   const [cursorMode, setCursorMode] = useState<'pointer' | 'pencil'>('pointer');
   const cursorModeRef = useRef(cursorMode);
   useEffect(() => { 
-    if (cursorModeRef.current === 'pencil' && currentDrawingRef.current.length > 2) {
+    cursorModeRef.current = cursorMode;
+    if (cursorMode !== 'pencil' && currentDrawingRef.current.length > 2) {
       // Auto-convert drawing when switching away from pencil
       const points = [...currentDrawingRef.current];
       // Close loop
@@ -354,12 +390,43 @@ export default function App() {
     cursorModeRef.current = cursorMode; 
   }, [cursorMode]);
 
-  const [unlockedModes, setUnlockedModes] = useState<string[]>(['pointer', 'pencil']);
+  const [unlockedModes, setUnlockedModes] = useState<string[]>(['pointer', 'pencil', 'lasso', 'bsod', 'storm']);
+  const [serverUnlockedItems, setServerUnlockedItems] = useState<string[]>([]);
+  const [isBSODActive, setIsBSODActive] = useState(false);
+  const [isFrozen, setIsFrozen] = useState(false);
+  const isFrozenRef = useRef(false);
+  const [bsodGlitched, setBsodGlitched] = useState(false);
+  const [adPopups, setAdPopups] = useState<{id: string, x: number, y: number, content: string}[]>([]);
+  const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
+  const [selectedShopItemId, setSelectedShopItemId] = useState<string | null>(null);
   const [winner, setWinner] = useState<{id: string, name: string} | null>(null);
+
+  const [isWheelOpen, setIsWheelOpen] = useState(false);
+  const isWheelOpenRef = useRef(isWheelOpen);
+  useEffect(() => { isWheelOpenRef.current = isWheelOpen; }, [isWheelOpen]);
+  
+  const [wheelSelection, setWheelSelection] = useState<string | null>(null);
+  const wheelSelectionRef = useRef(wheelSelection);
+  useEffect(() => { wheelSelectionRef.current = wheelSelection; }, [wheelSelection]);
+  
+  const unlockedModesRef = useRef(unlockedModes);
+  useEffect(() => { unlockedModesRef.current = unlockedModes; }, [unlockedModes]);
+  
+  const serverUnlockedItemsRef = useRef(serverUnlockedItems);
+  useEffect(() => { serverUnlockedItemsRef.current = serverUnlockedItems; }, [serverUnlockedItems]);
+  
+  const cooldownsRef = useRef(cooldowns);
+  useEffect(() => { cooldownsRef.current = cooldowns; }, [cooldowns]);
+
+  const [lassoContraction, setLassoContraction] = useState<{ points: {x: number, y: number}[], victims: string[], center: {x: number, y: number} } | null>(null);
+
   const [lassoState, setLassoState] = useState<{ active: boolean, swingAngle: number, fired: boolean, targetId: string | null, startTime: number, ropePoints: {x: number, y: number}[] }>({ active: false, swingAngle: 0, fired: false, targetId: null, startTime: 0, ropePoints: [] });
   const lassoStateRef = useRef(lassoState);
   useEffect(() => { lassoStateRef.current = lassoState; }, [lassoState]);
   const circleDetectionPoints = useRef<{x: number, y: number, t: number}[]>([]);
+  const lassoTargetVelocity = useRef({ x: 0, y: 0 });
+  const lassoAnchorRef = useRef<any>(null);
+  const lassoConstraintRef = useRef<any>(null);
 
   useEffect(() => {
     if (cursorMode === 'lasso' && lassoState.active && !lassoState.fired) {
@@ -445,10 +512,14 @@ export default function App() {
   const [currentDrawing, setCurrentDrawing] = useState<{x: number, y: number}[]>([]);
   const currentDrawingRef = useRef(currentDrawing);
   useEffect(() => { currentDrawingRef.current = currentDrawing; }, [currentDrawing]);
+  const MatterRef = useRef<any>(null);
   const physicsEngine = useRef<any>(null);
   const physicsBodies = useRef<Record<string, any>>({});
-  const lastPhysicsUpdate = useRef(0);
+  const lastPhysicsUpdateTime = useRef(0);
+  const physicsAccumulator = useRef(0);
+  const lastForceMoveEmit = useRef(0);
   const grabbedObjectId = useRef<string | null>(null);
+  const eventRef = useRef<any>({});
 
   const physicsObjectsRef = useRef(physicsObjects);
   useEffect(() => { physicsObjectsRef.current = physicsObjects; }, [physicsObjects]);
@@ -456,12 +527,13 @@ export default function App() {
   // Matter.js Initialization
   useEffect(() => {
     import('matter-js').then(Matter => {
+      MatterRef.current = Matter;
       const engine = Matter.Engine.create();
-      engine.gravity.y = 0.8; // Stronger gravity for more impact
+      engine.gravity.y = 1.0; // Standardized gravity
       physicsEngine.current = engine;
 
       // Add a static box around the desktop
-      const ground = Matter.Bodies.rectangle(500, 985, 1200, 50, { 
+      const ground = Matter.Bodies.rectangle(500, 995, 1200, 50, { 
         isStatic: true,
         label: 'ground',
         friction: 0.8,
@@ -472,9 +544,86 @@ export default function App() {
       const ceiling = Matter.Bodies.rectangle(500, -25, 1200, 50, { isStatic: true });
       Matter.World.add(engine.world, [ground, leftWall, rightWall, ceiling]);
 
-      const runner = () => {
-        if (!physicsEngine.current) return;
-        Matter.Engine.update(physicsEngine.current, 16.67);
+      const runner = (time: number) => {
+        if (!physicsEngine.current || !MatterRef.current) {
+          requestAnimationFrame(runner);
+          return;
+        }
+        const Matter = MatterRef.current;
+        const engine = physicsEngine.current;
+
+        if (!lastPhysicsUpdateTime.current) lastPhysicsUpdateTime.current = time;
+        const dt = Math.min(64, time - lastPhysicsUpdateTime.current);
+        lastPhysicsUpdateTime.current = time;
+
+        physicsAccumulator.current += dt;
+        const fixedDelta = 1000 / 60;
+
+        while (physicsAccumulator.current >= fixedDelta) {
+          Matter.Engine.update(engine, fixedDelta);
+          physicsAccumulator.current -= fixedDelta;
+        }
+        
+        // Handle Lasso Swing in Physics
+        const lasso = lassoStateRef.current;
+        if (lasso.fired && lasso.targetId) {
+          // Auto-expire after 6 seconds
+          if (lasso.startTime && Date.now() - lasso.startTime > 6000) {
+            setLassoState(prev => ({ ...prev, fired: false, targetId: null }));
+          }
+
+          const targetId = lasso.targetId;
+          const targetBodyId = `player-ragdoll-${targetId}`;
+          const targetBody = physicsBodies.current[targetBodyId];
+          
+          if (targetBody) {
+            // Ensure Anchor exists
+            if (!lassoAnchorRef.current) {
+              lassoAnchorRef.current = Matter.Bodies.circle(lastMousePos.current.x, lastMousePos.current.y, 5, { isStatic: true, isSensor: true });
+              Matter.World.add(physicsEngine.current.world, lassoAnchorRef.current);
+            }
+            
+            // Update Anchor Pos
+            Matter.Body.setPosition(lassoAnchorRef.current, { x: lastMousePos.current.x, y: lastMousePos.current.y });
+            
+            // Ensure Constraint exists
+            if (!lassoConstraintRef.current) {
+              lassoConstraintRef.current = Matter.Constraint.create({
+                bodyA: lassoAnchorRef.current,
+                bodyB: targetBody,
+                stiffness: 0.2, // Snappier
+                damping: 0.05,
+                length: 100, // Slightly shorter
+                render: { visible: false }
+              });
+              Matter.World.add(physicsEngine.current.world, lassoConstraintRef.current);
+            }
+            
+            // Sync target pos with throttling (30fps sync)
+            const nowTick = Date.now();
+            if (nowTick - lastForceMoveEmit.current > 33) {
+              if (targetId === 'dummy-id') {
+                 setOtherUsers(prev => ({
+                   ...prev,
+                   ['dummy-id']: { ...prev['dummy-id'], x: targetBody.position.x, y: targetBody.position.y }
+                 }));
+              } else {
+                 socketRef.current?.emit('force-move', { targetId, pos: { x: targetBody.position.x, y: targetBody.position.y } });
+              }
+              lastForceMoveEmit.current = nowTick;
+            }
+          }
+        } else {
+          // Cleanup Lasso constraints if not fired
+          if (lassoConstraintRef.current) {
+            Matter.World.remove(physicsEngine.current.world, lassoConstraintRef.current);
+            lassoConstraintRef.current = null;
+          }
+          if (lassoAnchorRef.current) {
+            Matter.World.remove(physicsEngine.current.world, lassoAnchorRef.current);
+            lassoAnchorRef.current = null;
+          }
+        }
         
         // Sync bodies to state
         const updatedObjects: any[] = [];
@@ -483,6 +632,9 @@ export default function App() {
         const now = Date.now();
 
         // Sync player ragdolls
+        const ragdollUpdates: Record<string, {x: number, y: number}> = {};
+        let localRagdollUpdate: {x: number, y: number} | null = null;
+        
         Object.entries(physicsBodies.current).forEach(([id, b]) => {
           const body = b as any;
           if (id.startsWith('player-ragdoll-')) {
@@ -490,32 +642,55 @@ export default function App() {
             const isMe = userId === socketRef.current?.id;
             
             if (isMe) {
-              // Move myself and notify others
-              lastMousePos.current = { x: body.position.x, y: body.position.y };
-              socketRef.current?.emit('mouse-move', { x: body.position.x, y: body.position.y });
+              localRagdollUpdate = { x: body.position.x, y: body.position.y };
             } else {
-              // Only update others if we're not receiving updates from them? 
-              // Actually, if we're all simulating the same physics, it might desync.
-              // But for simple "ragdoll", local simulation is fine for visual punch.
-              setOtherUsers(prev => {
-                if (!prev[userId]) return prev;
-                return {
-                  ...prev,
-                  [userId]: { ...prev[userId], x: body.position.x, y: body.position.y }
-                };
-              });
+              ragdollUpdates[userId] = { x: body.position.x, y: body.position.y };
             }
 
             // Damage on impact
-            const speed = Math.sqrt(body.velocity.x**2 + body.velocity.y**2);
-            if (speed > 12 && (body.position.x < 40 || body.position.x > 960 || body.position.y < 40 || body.position.y > 960)) {
-              if (isMe) setHealth(h => Math.max(0, h - 3));
+            const speedSq = body.velocity.x**2 + body.velocity.y**2;
+            if (speedSq > 225 && (body.position.x < 40 || body.position.x > 960 || body.position.y < 40 || body.position.y > 960)) {
+              const speed = Math.sqrt(speedSq);
+              const damageAmount = Math.floor(speed / 2.5);
+              if (isMe) setHealth(h => Math.max(0, h - damageAmount));
+              else socketRef.current?.emit('damage-player', { targetId: userId, damage: damageAmount });
+
+              setScreenShake(true);
+              setTimeout(() => setScreenShake(false), 200);
+
               const popupId = Math.random().toString();
-              setDamagePopups(prev => [...prev.slice(-10), { id: popupId, playerId: userId, amount: 3, x: body.position.x, y: body.position.y }]);
+              setDamagePopups(prev => [...prev.slice(-10), { id: popupId, playerId: userId, amount: damageAmount, x: body.position.x, y: body.position.y }]);
               setTimeout(() => setDamagePopups(prev => prev.filter(p => p.id !== popupId)), 2000);
             }
           }
         });
+
+        // Apply local player updates
+        if (localRagdollUpdate) {
+           const { x, y } = localRagdollUpdate;
+           lastMousePos.current = { x, y };
+           setMousePos({ x, y });
+           setUiMousePos({ x: x / 10, y: y / 10 });
+           if (Date.now() - lastForceMoveEmit.current > 33) {
+             socketRef.current?.emit('mouse-move', { x, y });
+             lastForceMoveEmit.current = Date.now();
+           }
+        }
+
+        // Apply remote ragdoll updates
+        if (Object.keys(ragdollUpdates).length > 0) {
+          setOtherUsers(prev => {
+            const next = { ...prev };
+            let changed = false;
+            Object.entries(ragdollUpdates).forEach(([uid, pos]) => {
+              if (next[uid] && (Math.abs(next[uid].x - pos.x) > 0.5 || Math.abs(next[uid].y - pos.y) > 0.5)) {
+                next[uid] = { ...next[uid], ...pos };
+                changed = true;
+              }
+            });
+            return changed ? next : prev;
+          });
+        }
 
         Object.entries(physicsBodies.current).forEach(([id, b]) => {
           if (id.startsWith('player-ragdoll-')) return; // handled above
@@ -602,6 +777,7 @@ export default function App() {
   const mouseVelocity = useRef({ x: 0, y: 0 });
   const lastVelocities = useRef<{x: number, y: number}[]>([]);
   const lastMousePos = useRef({ x: 0, y: 0 });
+  const lastScreenPos = useRef({ x: 0, y: 0 });
   const isSwiping = useRef(false);
   const swipeStartPos = useRef({ x: 0, y: 0 });
   const lastSwipeTick = useRef(0);
@@ -652,6 +828,90 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [isNewUser, setIsNewUser] = useState(false);
+
+  useEffect(() => {
+    // 1. Sync local status to Firestore for cross-region presence
+    if (!isConnected || !socketRef.current?.id) return;
+    
+    // We use a stable ID (Auth UID if logged in, else stable socket ID)
+    const pId = currentUser?.uid || socketRef.current.id;
+    const pRef = doc(db, 'rooms', 'public', 'presences', pId);
+    
+    const syncPresence = async () => {
+      try {
+        await setDoc(pRef, {
+          id: socketRef.current?.id || pId,
+          uid: currentUser?.uid || null,
+          username,
+          x: mousePos.x,
+          y: mousePos.y,
+          health,
+          isReady,
+          cursorMode,
+          lastActive: new Date().toISOString()
+        });
+      } catch (e) {
+        // Silently fail if offline
+      }
+    };
+
+    const interval = setInterval(syncPresence, 500); // 2hz for global sync is enough as fallback
+    return () => {
+      clearInterval(interval);
+      // Clean up on leave
+      const cleanup = async () => {
+        try { await updateDoc(pRef, { lastActive: '2000-01-01T00:00:00Z' }); } catch {}
+      };
+      cleanup();
+    };
+  }, [isConnected, mousePos, health, isReady, cursorMode, username, currentUser]);
+
+  useEffect(() => {
+    // 2. Listen to Firestore for other players (Global sync)
+    // This bridges users across different server instances
+    const colRef = collection(db, 'rooms', 'public', 'presences');
+    const unsub = onSnapshot(colRef, (snapshot) => {
+      setOtherUsers(prev => {
+        const next = { ...prev };
+        snapshot.docs.forEach(d => {
+          const data = d.data();
+          const pId = d.id;
+          
+          // Skip self
+          if (pId === (currentUser?.uid || socketRef.current?.id)) return;
+          
+          // Stale check (10s)
+          const lastSeen = new Date(data.lastActive).getTime();
+          if (Date.now() - lastSeen > 10000) {
+            delete next[pId];
+            return;
+          }
+
+          // Merge Firestore data into otherUsers
+          // We only update if this user isn't already being updated faster by Socket.io
+          // (Socket updates are handled in .on('user-moved') etc)
+          const lastSocketUpdate = presenceSyncRef.current[pId] || 0;
+          if (Date.now() - lastSocketUpdate > 1000) {
+             next[pId] = {
+               x: data.x,
+               y: data.y,
+               username: data.username,
+               health: data.health,
+               isReady: data.isReady,
+               cursorMode: data.cursorMode,
+               isRagdoll: data.isRagdoll || false
+             };
+          }
+        });
+        return next;
+      });
+    }, (err) => handleFirestoreError(err, OperationType.GET, 'rooms/public/presences'));
+    return () => unsub();
+  }, [currentUser]);
+
+  useEffect(() => {
+    isFrozenRef.current = isFrozen;
+  }, [isFrozen]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -749,7 +1009,13 @@ export default function App() {
 
   // Initial Socket Setup (Only runs once)
   useEffect(() => {
-    const socket = io();
+    // Setup more robust connection with transports fallback and automatic reconnection
+    const socket = io({
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000,
+      timeout: 20000
+    });
     socketRef.current = socket;
 
     socket.on('connect', () => {
@@ -783,24 +1049,23 @@ export default function App() {
         setPhysicsObjects(Object.values(sharedPhysics));
         // Add bodies for shared physics
         Object.values(sharedPhysics).forEach(obj => {
-          import('matter-js').then(Matter => {
-            if (!physicsEngine.current || physicsBodies.current[obj.id]) return;
-            const minX = Math.min(...obj.points.map(p => p.x));
-            const maxX = Math.max(...obj.points.map(p => p.x));
-            const minY = Math.min(...obj.points.map(p => p.y));
-            const maxY = Math.max(...obj.points.map(p => p.y));
-            const centerX = (minX + maxX) / 2;
-            const centerY = (minY + maxY) / 2;
-            const body = Matter.Bodies.fromVertices(centerX, centerY, [obj.points.map(p => ({ x: p.x, y: p.y }))], {
-              label: obj.id,
-              restitution: 0.5,
-              static: obj.heldBy !== null
-            });
-            if (body) {
-              Matter.World.add(physicsEngine.current.world, body);
-              physicsBodies.current[obj.id] = body;
-            }
+          const Matter = MatterRef.current;
+          if (!Matter || !physicsEngine.current || physicsBodies.current[obj.id]) return;
+          const minX = Math.min(...obj.points.map(p => p.x));
+          const maxX = Math.max(...obj.points.map(p => p.x));
+          const minY = Math.min(...obj.points.map(p => p.y));
+          const maxY = Math.max(...obj.points.map(p => p.y));
+          const centerX = (minX + maxX) / 2;
+          const centerY = (minY + maxY) / 2;
+          const body = Matter.Bodies.fromVertices(centerX, centerY, [obj.points.map(p => ({ x: p.x, y: p.y }))], {
+            label: obj.id,
+            restitution: 0.5,
+            static: obj.heldBy !== null
           });
+          if (body) {
+            Matter.World.add(physicsEngine.current.world, body);
+            physicsBodies.current[obj.id] = body;
+          }
         });
       }
       
@@ -826,20 +1091,20 @@ export default function App() {
       if (effect === 'ragdoll') {
         const isMe = userId === socketRef.current?.id;
         if (isMe) {
-          setHealth(h => Math.max(0, h - 5));
           setIsRagdoll(true);
         }
         
-        setOtherUsers(prev => ({
-          ...prev,
-          [userId]: { ...prev[userId], isRagdoll: true }
-        }));
+        setOtherUsers(prev => {
+          if (!prev[userId]) return prev;
+          return { ...prev, [userId]: { ...prev[userId], isRagdoll: true } };
+        });
 
         import('matter-js').then(Matter => {
           if (!physicsEngine.current) return;
           const bodyId = `player-ragdoll-${userId}`;
           
-          // Get current position of target
+          if (physicsBodies.current[bodyId]) return;
+
           let startPos = { x: 500, y: 500 };
           if (isMe) {
             startPos = { x: lastMousePos.current.x, y: lastMousePos.current.y };
@@ -851,26 +1116,40 @@ export default function App() {
             label: bodyId,
             restitution: 0.6,
             friction: 0.1,
-            density: 0.005,
-            frictionAir: 0.01
+            frictionAir: 0.01,
+            density: 0.005 // Slightly heavier for dragging
           });
           
-          // Give it a little random kick
+          // Small kick
           Matter.Body.setVelocity(body, { x: (Math.random() - 0.5) * 10, y: -10 });
           
           Matter.World.add(physicsEngine.current.world, body);
           physicsBodies.current[bodyId] = body;
 
+          const cleanup = () => {
+             if (isMe) setIsRagdoll(false);
+             setOtherUsers(prev => {
+               if (!prev[userId]) return prev;
+               return { ...prev, [userId]: { ...prev[userId], isRagdoll: false } };
+             });
+             const b = physicsBodies.current[bodyId];
+             if (b && physicsEngine.current) {
+               Matter.World.remove(physicsEngine.current.world, b);
+               delete physicsBodies.current[bodyId];
+             }
+          };
+
           setTimeout(() => {
-            if (physicsBodies.current[bodyId] && physicsEngine.current) {
-              Matter.World.remove(physicsEngine.current.world, physicsBodies.current[bodyId]);
-              delete physicsBodies.current[bodyId];
+            if (lassoStateRef.current.targetId === userId) {
+              const interval = setInterval(() => {
+                if (lassoStateRef.current.targetId !== userId) {
+                   clearInterval(interval);
+                   cleanup();
+                }
+              }, 200);
+            } else {
+              cleanup();
             }
-            if (isMe) setIsRagdoll(false);
-            setOtherUsers(prev => ({
-              ...prev,
-              [userId]: { ...prev[userId], isRagdoll: false }
-            }));
           }, duration);
         });
       }
@@ -879,10 +1158,8 @@ export default function App() {
     socket.on('physics-object-moved', ({ id, pos }: { id: string, pos: { x: number, y: number } }) => {
       setPhysicsObjects(prev => prev.map(o => o.id === id ? { ...o, x: pos.x, y: pos.y } : o));
       const body = physicsBodies.current[id];
-      if (body) {
-        import('matter-js').then(Matter => {
-          Matter.Body.setPosition(body, { x: pos.x, y: pos.y });
-        });
+      if (body && MatterRef.current) {
+        MatterRef.current.Body.setPosition(body, { x: pos.x, y: pos.y });
       }
     });
 
@@ -967,18 +1244,17 @@ export default function App() {
       setPhysicsObjects(prev => [...prev, obj]);
       import('matter-js').then(Matter => {
         if (!physicsEngine.current) return;
-        // Simplify vertices for Matter.js: use convex hull for reliability, and ensure mass
+        // Simplify vertices for Matter.js: use convex hull for reliability
         const vertices = Matter.Vertices.hull(obj.points.map(p => ({ x: p.x, y: p.y })));
         const body = Matter.Bodies.fromVertices(obj.x, obj.y, [vertices], {
           render: { fillStyle: obj.color },
           label: obj.id,
-          restitution: 0.1, // Less bouncy for drawings
+          restitution: 0.1,
           friction: 0.8,
           frictionAir: 0.05,
-          density: 0.01 // Make them feel heavy
+          density: 0.01 
         });
         
-        // Fallback to rectangle if vertices composition fails
         const finalBody = body || Matter.Bodies.rectangle(obj.x, obj.y, 40, 40, {
           label: obj.id,
           restitution: 0.5
@@ -1001,23 +1277,20 @@ export default function App() {
 
     socket.on('physics-object-removed', (id: string) => {
       setPhysicsObjects(prev => prev.filter(o => o.id !== id));
-      import('matter-js').then(Matter => {
-        const body = physicsBodies.current[id];
-        if (body && physicsEngine.current) {
-          Matter.World.remove(physicsEngine.current.world, body);
-          delete physicsBodies.current[id];
-        }
-      });
+      const Matter = MatterRef.current;
+      if (Matter && physicsBodies.current[id] && physicsEngine.current) {
+        Matter.World.remove(physicsEngine.current.world, physicsBodies.current[id]);
+        delete physicsBodies.current[id];
+      }
     });
 
     socket.on('physics-object-grabbed', ({ id, userId }: { id: string, userId: string }) => {
       setPhysicsObjects(prev => prev.map(o => o.id === id ? { ...o, heldBy: userId } : o));
-      import('matter-js').then(Matter => {
-        const body = physicsBodies.current[id];
-        if (body) {
-          Matter.Body.setStatic(body, true);
-        }
-      });
+      const Matter = MatterRef.current;
+      const body = physicsBodies.current[id];
+      if (Matter && body) {
+        Matter.Body.setStatic(body, true);
+      }
     });
 
     socket.on('physics-object-thrown', ({ id, velocity }: { id: string, velocity: { x: number, y: number } }) => {
@@ -1038,6 +1311,10 @@ export default function App() {
       setIsGameActive(false);
       setWinner(null);
       setCountdown(null);
+      setIsBSODActive(false);
+      setBsodGlitched(false);
+      setIsFrozen(false);
+      isFrozenRef.current = false;
       const { [socket.id as string]: self, ...others } = usersMap;
       if (currentServerRef.current === 'training') {
         others['dummy-id'] = {
@@ -1049,6 +1326,7 @@ export default function App() {
     });
 
     socket.on('user-moved', ({ id, pos }: { id: string, pos: { x: number, y: number } }) => {
+      presenceSyncRef.current[id] = Date.now();
       setOtherUsers(prev => {
         if (!prev[id]) return prev;
         return { ...prev, [id]: { ...prev[id], ...pos } };
@@ -1061,6 +1339,59 @@ export default function App() {
         delete next[id];
         return next;
       });
+    });
+
+    socket.on('bsod-start', ({ triggererId }: { triggererId: string }) => {
+      if (socketRef.current?.id === triggererId) return;
+      setIsBSODActive(true);
+      setIsFrozen(true);
+      isFrozenRef.current = true;
+      setTimeout(() => {
+        setIsFrozen(false);
+        isFrozenRef.current = false;
+      }, 2000);
+      
+      const glitchInterval = setInterval(() => {
+        setBsodGlitched(true);
+        setTimeout(() => setBsodGlitched(false), 80);
+      }, 800);
+
+      setTimeout(() => {
+        setIsBSODActive(false);
+        setBsodGlitched(false);
+        clearInterval(glitchInterval);
+      }, 10000);
+    });
+
+    socket.on('storm-start', ({ triggererId }: { triggererId: string }) => {
+      if (socketRef.current?.id === triggererId) return;
+      let count = 0;
+      const totalAds = 15;
+      const interval = setInterval(() => {
+        const id = Math.random().toString(36).substring(7);
+        const x = 10 + Math.random() * 60;
+        const y = 10 + Math.random() * 60;
+        const ads = [
+          "WIN A NEW IPHONE!!!", 
+          "YOUR PC IS INFECTED!", 
+          "SINGLE MICE IN YOUR AREA", 
+          "DOWNLOAD FREE RAM", 
+          "CONGRATULATIONS!", 
+          "URGENT SYSTEM UPDATE",
+          "YOU ARE THE 1,000,000th VISITOR!",
+          "CLICK HERE FOR FREE MONEY",
+          "HOT CHEESE NEARBY"
+        ];
+        const content = ads[Math.floor(Math.random() * ads.length)];
+        
+        setAdPopups(prev => [...prev, { id, x, y, content }]);
+        count++;
+        if (count >= totalAds) clearInterval(interval);
+      }, 300);
+    });
+
+    socket.on('server-item-unlocked', ({ itemId }: { itemId: string }) => {
+      setServerUnlockedItems(prev => [...prev, itemId]);
     });
 
     const timer = setInterval(() => setTime(new Date()), 1000);
@@ -1106,10 +1437,47 @@ export default function App() {
     };
 
     const handleMouseMove = (e: MouseEvent) => {
-      if (isRagdollRef.current) return;
+      if (isRagdollRef.current || isFrozenRef.current) return;
       const screenPos = { x: e.clientX, y: e.clientY };
+      lastScreenPos.current = screenPos;
       const pos = normalize(screenPos);
       setMousePos(pos);
+
+      if (isMouseDown.current && cursorModeRef.current === 'lasso' && !lassoStateRef.current.targetId) {
+        setCurrentDrawing(prev => {
+          const last = prev[prev.length - 1];
+          if (!last) return [{ x: pos.x, y: pos.y }];
+          const d = Math.sqrt(Math.pow(pos.x - last.x, 2) + Math.pow(pos.y - last.y, 2));
+          if (d > 5) {
+            const next = [...prev, { x: pos.x, y: pos.y }].slice(-100);
+            if (next.length > 20) {
+              const start = next[0];
+              const gap = Math.sqrt((pos.x - start.x)**2 + (pos.y - start.y)**2);
+              if (gap < 40) {
+                 const victims: string[] = [];
+                 Object.entries(otherUsersRef.current).forEach(([id, u]) => {
+                   const user = u as UserState;
+                   if (isPointInPoly({ x: user.x, y: user.y }, next)) victims.push(id);
+                 });
+                 if (victims.length > 0) {
+                    const hitId = victims[0];
+                    setLassoState(prev => ({ ...prev, fired: true, targetId: hitId, startTime: Date.now() }));
+                    lassoTargetVelocity.current = { x: 0, y: 0 };
+                    if (hitId === 'dummy-id') {
+                      socketRef.current?.emit('user-effect', { userId: 'dummy-id', effect: 'ragdoll', duration: 6000 });
+                    } else {
+                      socketRef.current?.emit('damage-player', { targetId: hitId, damage: 0, effects: ['ragdoll'], duration: 6000 });
+                    }
+                    return []; 
+                 }
+              }
+            }
+            return next;
+          }
+          return prev;
+        });
+        return;
+      }
 
       if (isMouseDown.current) {
         swipePath.current.push({...pos, t: Date.now()});
@@ -1125,64 +1493,12 @@ export default function App() {
         const speed = Math.sqrt(mouseVelocity.current.x**2 + mouseVelocity.current.y**2);
         if (isSwiping.current) {
           detectCircularMotion(pos);
-        } else if (lassoStateRef.current.active && !lassoStateRef.current.fired) {
-          // Keep it active but check if we should deactivate if speed is 0 for too long
         }
       }
 
-      // Lasso Ragdoll Fling logic
-      if (lassoStateRef.current.targetId) {
-        const targetId = lassoStateRef.current.targetId;
-        const targetState = targetId === 'dummy-id' ? otherUsersRef.current['dummy-id'] : otherUsersRef.current[targetId];
-        
-        if (targetState) {
-          // Calculate move towards mouse with high momentum and a bit of "spring"
-          const dx = pos.x - targetState.x;
-          const dy = pos.y - targetState.y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          
-          // Tighten the rope if pulled far
-          if (dist > 30) {
-            const pullStrength = 0.25; // Snappy follows mouse
-            let newX = targetState.x + dx * pullStrength;
-            let newY = targetState.y + dy * pullStrength;
-            
-            // Add some gravity influence
-            newY += 2; 
-
-            // Check for border collisions with damage and impact bounce
-            let tookDamage = false;
-            if (newX < 30 || newX > 970 || newY < 30 || newY > 970) {
-              tookDamage = true;
-              newX = Math.max(30, Math.min(970, newX));
-              newY = Math.max(30, Math.min(970, newY));
-            }
-
-            if (targetId === 'dummy-id') {
-              setOtherUsers(prev => ({
-                ...prev,
-                ['dummy-id']: { 
-                  ...prev['dummy-id'], 
-                  x: newX, 
-                  y: newY, 
-                  health: tookDamage ? Math.max(0, prev['dummy-id'].health - 3) : prev['dummy-id'].health 
-                }
-              }));
-              if (tookDamage) {
-                const popupId = Math.random().toString();
-                setDamagePopups(prev => [...prev.slice(-10), { id: popupId, playerId: 'dummy-id', amount: 3, x: newX, y: newY }]);
-                setTimeout(() => setDamagePopups(prev => prev.filter(p => p.id !== popupId)), 2000);
-              }
-            } else {
-              socketRef.current?.emit('force-move', { targetId, pos: { x: newX, y: newY } });
-              if (tookDamage) socketRef.current?.emit('damage-player', { targetId, damage: 3 });
-            }
-          }
-        }
-      }
-      
       if (cursorModeRef.current === 'pencil' && isSwiping.current) {
         setCurrentDrawing(prev => {
+          if (prev.length >= 150) return prev; // Limit reached
           const last = prev[prev.length - 1];
           if (!last) return [{ x: pos.x, y: pos.y }];
           const dist = Math.sqrt(Math.pow(pos.x - last.x, 2) + Math.pow(pos.y - last.y, 2));
@@ -1193,10 +1509,8 @@ export default function App() {
 
       if (grabbedObjectId.current) {
         const body = physicsBodies.current[grabbedObjectId.current];
-        if (body) {
-          import('matter-js').then(Matter => {
-            Matter.Body.setPosition(body, { x: pos.x, y: pos.y });
-          });
+        if (body && MatterRef.current) {
+          MatterRef.current.Body.setPosition(body, { x: pos.x, y: pos.y });
           socketRef.current?.emit('move-physics-object', { id: grabbedObjectId.current, pos });
         }
       }
@@ -1239,10 +1553,11 @@ export default function App() {
     };
 
     const handleMouseDown = (e: MouseEvent) => {
-      if (isRagdollRef.current) return;
+      if (isRagdollRef.current || isFrozenRef.current) return;
       isMouseDown.current = true;
       swipeStartTime.current = Date.now();
       const pos = normalize({ x: e.clientX, y: e.clientY });
+      
       swipePath.current = [{...pos, t: Date.now()}];
       swipeStartPos.current = pos;
       lastTrailPoint.current = pos;
@@ -1263,6 +1578,13 @@ export default function App() {
       if (e.button === 0) { // LEFT CLICK
         if (cursorModeRef.current === 'pencil') {
           setCurrentDrawing([{ x: pos.x, y: pos.y }]);
+        } else if (cursorModeRef.current === 'lasso') {
+          const now = Date.now();
+          const isCombatMode = isGameActiveRef.current || currentServerRef.current === 'training';
+          if (!isCombatMode) return;
+          if (cooldowns['lasso'] && now < cooldowns['lasso']) return;
+          setCurrentDrawing([{ x: pos.x, y: pos.y }]);
+          return;
         } else {
           // Check if grabbing a physics object
           const grabbed = physicsObjectsRef.current.find(obj => {
@@ -1302,7 +1624,7 @@ export default function App() {
             if (diff > Math.PI) diff = 2 * Math.PI - diff;
             if (diff > 0.8) sharpnessScore += 1; // It's a "sharp" turn
           }
-          const damage = Math.min(8, Math.max(1, Math.round(sharpnessScore / 2) + 1));
+          const damage = Math.min(4, Math.max(1, Math.round(sharpnessScore / 4) + 1));
 
           const centerX = points.reduce((acc, p) => acc + p.x, 0) / points.length;
           const centerY = points.reduce((acc, p) => acc + p.y, 0) / points.length;
@@ -1326,12 +1648,9 @@ export default function App() {
       }
 
       // Click attack detection
-      const fightsOpen = windowsRef.current.find(w => w.id === 'fights-exe')?.isOpen;
-      
-      // If we clicked on UI, don't trigger attack unless it's the game area
       if (isWindowOrButton && !target.closest('#desktop-canvas')) {
         // Just UI interaction
-      } else if (cursorModeRef.current === 'pointer' && (fightsOpen || isGameActiveRef.current)) {
+      } else if (cursorModeRef.current === 'pointer' && (isGameActiveRef.current || currentServerRef.current === 'training')) {
           Object.entries(otherUsersRef.current).forEach(([id, user]) => {
             const u = user as UserState;
             const dist = Math.sqrt(Math.pow(pos.x - u.x, 2) + Math.pow(pos.y - u.y, 2));
@@ -1339,10 +1658,10 @@ export default function App() {
               if (id === 'dummy-id') {
                 setOtherUsers(prev => ({
                   ...prev,
-                  ['dummy-id']: { ...prev['dummy-id'], health: Math.max(0, prev['dummy-id'].health - 8) }
+                  ['dummy-id']: { ...prev['dummy-id'], health: Math.max(0, prev['dummy-id'].health - 4) }
                 }));
               } else {
-                socketRef.current?.emit('damage-player', { targetId: id, damage: 8 });
+                socketRef.current?.emit('damage-player', { targetId: id, damage: 4 });
               }
             }
           });
@@ -1353,13 +1672,72 @@ export default function App() {
       const screenPos = { x: e.clientX, y: e.clientY };
       const pos = normalize(screenPos);
       isMouseDown.current = false;
+      setIsClicked(false);
       
+      if (cursorModeRef.current === 'lasso' && currentDrawingRef.current.length > 5) {
+        const points = currentDrawingRef.current;
+        const start = points[0];
+        const end = points[points.length - 1];
+        const dist = Math.sqrt(Math.pow(start.x - end.x, 2) + Math.pow(start.y - end.y, 2));
+        
+        if (lassoStateRef.current.targetId) {
+            // FLING ON RELEASE
+            const targetId = lassoStateRef.current.targetId;
+            const targetBodyId = `player-ragdoll-${targetId}`;
+            const targetBody = physicsBodies.current[targetBodyId];
+            
+            if (targetBody && MatterRef.current) {
+                const Matter = MatterRef.current;
+                // Apply momentum to fling
+                const velX = targetBody.velocity.x * 2.5;
+                const velY = targetBody.velocity.y * 2.5;
+                Matter.Body.setVelocity(targetBody, { x: velX, y: velY });
+            }
+
+            setLassoState(prev => ({ ...prev, fired: false, targetId: null }));
+        } else if (dist < 100) { 
+          const victims: string[] = [];
+          Object.entries(otherUsersRef.current).forEach(([id, u]) => {
+            const user = u as any;
+            if (isPointInPoly({ x: user.x, y: user.y }, points)) {
+              victims.push(id);
+            }
+          });
+
+          if (victims.length > 0) {
+            const hitId = victims[0];
+            setLassoState(prev => ({ ...prev, fired: true, targetId: hitId, startTime: Date.now() }));
+            lassoTargetVelocity.current = { x: 0, y: 0 };
+            
+            // Locally set ragdoll state for immediate feedback
+            setOtherUsers(prev => {
+              if (prev[hitId]) return { ...prev, [hitId]: { ...prev[hitId], isRagdoll: true } };
+              return prev;
+            });
+
+            const center = {
+              x: points.reduce((a, b) => a + b.x, 0) / points.length,
+              y: points.reduce((a, b) => a + b.y, 0) / points.length
+            };
+            setLassoContraction({ points, victims, center });
+            setTimeout(() => setLassoContraction(null), 800);
+
+            if (hitId === 'dummy-id') {
+              socketRef.current?.emit('user-effect', { userId: 'dummy-id', effect: 'ragdoll', duration: 6000 });
+            } else {
+              socketRef.current?.emit('damage-player', { targetId: hitId, damage: 0, effects: ['ragdoll'], duration: 6000 });
+            }
+          }
+        }
+        setCurrentDrawing([]);
+        return;
+      }
+
       const swipeDuration = Date.now() - swipeStartTime.current;
       const swipeDist = Math.sqrt(Math.pow(pos.x - swipeStartPos.current.x, 2) + Math.pow(pos.y - swipeStartPos.current.y, 2));
       const now = Date.now();
       
-      const fightsOpen = windowsRef.current.find(w => w.id === 'fights-exe')?.isOpen;
-      const isCombatMode = fightsOpen || isGameActiveRef.current || currentServerRef.current === 'training';
+      const isCombatMode = isGameActiveRef.current || currentServerRef.current === 'training';
 
       // 1. FAST SWIPE ATTACK (Pointer mode only)
       if (isSwiping.current && cursorModeRef.current === 'pointer' && isCombatMode) {
@@ -1393,10 +1771,10 @@ export default function App() {
                if (id === 'dummy-id') {
                  setOtherUsers(prev => ({
                    ...prev,
-                   ['dummy-id']: { ...prev['dummy-id'], health: Math.max(0, prev['dummy-id'].health - 12) }
+                   ['dummy-id']: { ...prev['dummy-id'], health: Math.max(0, prev['dummy-id'].health - 6) }
                  }));
                } else {
-                 socketRef.current?.emit('damage-player', { targetId: id, damage: 12 });
+                 socketRef.current?.emit('damage-player', { targetId: id, damage: 6 });
                }
             }
           });
@@ -1404,7 +1782,7 @@ export default function App() {
       }
 
       // 2. LASSO RELEASE
-      if (isSwiping.current && cursorModeRef.current === 'lasso' && lassoStateRef.current.active && !lassoStateRef.current.fired) {
+      if (isSwiping.current && cursorModeRef.current === 'lasso' && lassoStateRef.current.active && !lassoStateRef.current.fired && isCombatMode) {
           const firePos = { ...pos };
           let hitId: string | null = null;
           
@@ -1416,10 +1794,11 @@ export default function App() {
 
           if (hitId) {
             setLassoState(prev => ({ ...prev, fired: true, targetId: hitId, startTime: Date.now() }));
-            socketRef.current?.emit('damage-player', { targetId: hitId, damage: 0, effects: ['ragdoll'] });
-            setTimeout(() => {
-              setLassoState({ active: false, swingAngle: 0, fired: false, targetId: null, startTime: 0, ropePoints: [] });
-            }, 3000);
+            if (hitId === 'dummy-id') {
+              socketRef.current?.emit('user-effect', { userId: 'dummy-id', effect: 'ragdoll', duration: 6000 });
+            } else {
+              socketRef.current?.emit('damage-player', { targetId: hitId, damage: 0, effects: ['ragdoll'], duration: 6000 });
+            }
           } else {
             setLassoState({ active: false, swingAngle: 0, fired: false, targetId: null, startTime: 0, ropePoints: [] });
           }
@@ -1462,7 +1841,7 @@ export default function App() {
           setSwipes(prev => [...prev, { id: swipeId, attackerId: socketRef.current?.id || '', from, to, color: '#facc15' }]);
           setTimeout(() => setSwipes(prev => prev.filter(s => s.id !== swipeId)), 2500);
 
-          if (fightsOpen || isGameActiveRef.current) {
+          if (isCombatMode) {
             Object.entries(otherUsersRef.current).forEach(([id, user]) => {
               const u = user as UserState;
               const d = lineToPointDistance(from, to, { x: u.x, y: u.y });
@@ -1506,12 +1885,6 @@ export default function App() {
     };
 
     const handleWheel = (e: WheelEvent) => {
-      // Only switch during fights
-      const fightsOpen = windowsRef.current.find(w => w.id === 'fights-exe')?.isOpen;
-      const isCombatMode = fightsOpen || isGameActiveRef.current || currentServerRef.current === 'training';
-      
-      if (!isCombatMode) return;
-
       // Ignore if scrolling inside a window 
       const target = e.target as HTMLElement;
       if (target.closest('.xp-window')) return;
@@ -1521,31 +1894,66 @@ export default function App() {
         const direction = scrollAccumulator.current > 0 ? 1 : -1;
         scrollAccumulator.current = 0;
         setCursorMode(prev => {
-          const modes: any[] = unlockedModes;
+          const modes = [...unlockedModesRef.current, ...serverUnlockedItemsRef.current].filter(m => !m.includes('bsod') && !m.includes('storm'));
           const idx = modes.indexOf(prev);
           const next = modes[(idx + direction + modes.length) % modes.length];
           setShowModeSwitch(true);
-          setTimeout(() => setShowModeSwitch(false), 1200);
+          // @ts-ignore
+          if (window._modeTimeout) clearTimeout(window._modeTimeout);
+          // @ts-ignore
+          window._modeTimeout = setTimeout(() => setShowModeSwitch(false), 2000);
           return next;
         });
       }
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Tab') {
-        const fightsOpen = windowsRef.current.find(w => w.id === 'fights-exe')?.isOpen;
-        const isCombatMode = fightsOpen || isGameActiveRef.current || currentServerRef.current === 'training';
-        
+      const isCombatMode = isGameActiveRef.current || currentServerRef.current === 'training';
+      
+      if (e.key.toLowerCase() === 'q' || e.key.toLowerCase() === 'c') {
         if (isCombatMode) {
-          e.preventDefault();
-          setCursorMode(prev => {
-            const modes: any[] = unlockedModes;
-            const idx = modes.indexOf(prev);
-            const next = modes[(idx + 1) % modes.length];
-            setShowModeSwitch(true);
-            setTimeout(() => setShowModeSwitch(false), 1000);
-            return next;
-          });
+          setIsWheelOpen(true);
+        }
+      }
+
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        setCursorMode(prev => {
+          const modes = [...unlockedModesRef.current, ...serverUnlockedItemsRef.current].filter(m => !m.includes('bsod') && !m.includes('storm'));
+          const idx = modes.indexOf(prev);
+          const next = modes[(idx + 1) % modes.length];
+          setShowModeSwitch(true);
+          // @ts-ignore
+          if (window._modeTimeout) clearTimeout(window._modeTimeout);
+          // @ts-ignore
+          window._modeTimeout = setTimeout(() => setShowModeSwitch(false), 2000);
+          return next;
+        });
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === 'q' || e.key.toLowerCase() === 'c') {
+        if (isWheelOpenRef.current) {
+          if (wheelSelectionRef.current) {
+            const now = Date.now();
+            const selection = wheelSelectionRef.current;
+            if (selection === 'lasso') {
+              setCursorMode('lasso');
+            } else if (selection === 'bsod') {
+              if (!cooldownsRef.current['bsod'] || now >= cooldownsRef.current['bsod']) {
+                socketRef.current?.emit('bsod-trigger');
+                setCooldowns(prev => ({ ...prev, bsod: now + 45000 }));
+              }
+            } else if (selection === 'storm') {
+              if (!cooldownsRef.current['storm'] || now >= cooldownsRef.current['storm']) {
+                socketRef.current?.emit('storm-trigger');
+                setCooldowns(prev => ({ ...prev, storm: now + 30000 }));
+              }
+            }
+          }
+          setIsWheelOpen(false);
+          setWheelSelection(null);
         }
       }
     };
@@ -1562,45 +1970,75 @@ export default function App() {
     };
 
     const handleTouchEnd = (e: TouchEvent) => {
-      handleMouseUp({} as any);
+      handleMouseUp({ clientX: lastScreenPos.current.x, clientY: lastScreenPos.current.y, button: 0 } as any);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mousedown', handleMouseDown);
-    window.addEventListener('mouseup', handleMouseUp);
-    window.addEventListener('touchstart', handleTouchStart, { passive: false });
-    window.addEventListener('touchmove', handleTouchMove, { passive: false });
-    window.addEventListener('touchend', handleTouchEnd, { passive: false });
-    window.addEventListener('wheel', handleWheel);
-    window.addEventListener('keydown', handleKeyDown);
+    eventRef.current = { handleMouseMove, handleMouseDown, handleMouseUp, handleWheel, handleKeyDown, handleKeyUp, handleTouchStart, handleTouchMove, handleTouchEnd };
+
+    // Exposure for mobile buttons
+    // @ts-ignore
+    window._finishPencilDrawing = () => {
+       eventRef.current.handleMouseUp({ clientX: 0, clientY: 0, button: 2 } as any);
+    };
+
+    const wrapMouseMove = (e: any) => eventRef.current.handleMouseMove(e);
+    const wrapMouseDown = (e: any) => eventRef.current.handleMouseDown(e);
+    const wrapMouseUp = (e: any) => eventRef.current.handleMouseUp(e);
+    const wrapTouchStart = (e: any) => eventRef.current.handleTouchStart(e);
+    const wrapTouchMove = (e: any) => eventRef.current.handleTouchMove(e);
+    const wrapTouchEnd = (e: any) => eventRef.current.handleTouchEnd(e);
+    const wrapWheel = (e: any) => eventRef.current.handleWheel(e);
+    const wrapKeyDown = (e: any) => eventRef.current.handleKeyDown(e);
+    const wrapKeyUp = (e: any) => eventRef.current.handleKeyUp(e);
+
+    window.addEventListener('mousemove', wrapMouseMove);
+    window.addEventListener('mousedown', wrapMouseDown);
+    window.addEventListener('mouseup', wrapMouseUp);
+    window.addEventListener('touchstart', wrapTouchStart, { passive: false });
+    window.addEventListener('touchmove', wrapTouchMove, { passive: false });
+    window.addEventListener('touchend', wrapTouchEnd, { passive: false });
+    window.addEventListener('wheel', wrapWheel);
+    window.addEventListener('keydown', wrapKeyDown);
+    window.addEventListener('keyup', wrapKeyUp);
     window.addEventListener('contextmenu', (e) => e.preventDefault());
     
     return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mousedown', handleMouseDown);
-      window.removeEventListener('mouseup', handleMouseUp);
-      window.removeEventListener('touchstart', handleTouchStart);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('touchend', handleTouchEnd);
-      window.removeEventListener('wheel', handleWheel);
-      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('mousemove', wrapMouseMove);
+      window.removeEventListener('mousedown', wrapMouseDown);
+      window.removeEventListener('mouseup', wrapMouseUp);
+      window.removeEventListener('touchstart', wrapTouchStart);
+      window.removeEventListener('touchmove', wrapTouchMove);
+      window.removeEventListener('touchend', wrapTouchEnd);
+      window.removeEventListener('wheel', wrapWheel);
+      window.removeEventListener('keydown', wrapKeyDown);
+      window.removeEventListener('keyup', wrapKeyUp);
       window.removeEventListener('contextmenu', (e) => e.preventDefault());
     };
   }, []); // Truly stable event handlers
   const shopItems = [
-    { id: 'lasso', name: 'Lasso.sh', price: 15, icon: 'https://img.icons8.com/pixel-serif/64/null/lasso.png', desc: 'Spin mouse to activate. Click to catch players for 5s' },
-    { id: 'eraser', name: 'Recycle Bin', price: 20, icon: '/recycle-bin.png', desc: 'Deletes whatever it touches' },
-    { id: 'hammer', name: 'Hammer.exe', price: 35, icon: 'https://img.icons8.com/pixel-serif/64/null/hammer.png', desc: 'Crushing damage' },
-    { id: 'spray', name: 'Spray.dll', price: 50, icon: 'https://img.icons8.com/pixel-serif/64/null/paint-spray.png', desc: 'Damage over time' },
-    { id: 'bucket', name: 'Fill Tool', price: 75, icon: 'https://img.icons8.com/pixel-serif/64/null/paint-bucket.png', desc: 'Creates heavy objects' },
-    { id: 'stamp', name: 'Stamp.vbs', price: 100, icon: 'https://img.icons8.com/pixel-serif/64/null/stamp.png', desc: 'Creates terrain' },
+    { id: 'storm', name: 'Pop-up Ad Storm', priceServer: 30, pricePersonal: 100, icon: 'https://img.icons8.com/color/96/commercial.png', desc: 'Release a chaotic storm of ads on everyone\'s screen.' },
+    { id: 'bsod', name: 'Global BSOD', priceServer: 50, pricePersonal: 150, icon: '/BSOD.png', desc: 'Freeze the server for 2s, followed by a 10s BSOD effect.' },
+    { id: 'lasso', name: 'Lasso.sh', priceServer: 40, pricePersonal: 120, icon: '/Lasso head.png', desc: 'Draw a circle around players to ragdoll them.' },
   ];
 
-  const buyItem = (itemId: string, price: number) => {
+  const buyItem = (itemId: string, type: 'personal' | 'server') => {
     const isTraining = currentServerRef.current === 'training';
-    if ((isTraining || money >= price) && !unlockedModes.includes(itemId)) {
+    const item = shopItems.find(i => i.id === itemId);
+    if (!item) return;
+    
+    const price = type === 'personal' ? item.pricePersonal : item.priceServer;
+    
+    if ((isTraining || money >= price)) {
       if (!isTraining) setMoney(m => m - price);
-      setUnlockedModes(prev => [...prev, itemId]);
+      
+      const fullId = type === 'personal' ? `${itemId}-personal` : `${itemId}-server`;
+      
+      if (type === 'server') {
+        socketRef.current?.emit('buy-server-item', { itemId: fullId });
+      } else {
+        setUnlockedModes(prev => [...prev, fullId]);
+      }
+      setSelectedShopItemId(null);
     }
   };
 
@@ -1723,12 +2161,15 @@ export default function App() {
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
+  const [isMobile, setIsMobile] = useState(false);
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [containerScale, setContainerScale] = useState(1);
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const handleResize = () => {
+      setIsMobile(window.matchMedia('(max-width: 768px)').matches || ('ontouchstart' in window));
+      
       if (!containerRef.current) return;
       const winW = window.innerWidth;
       const winH = window.innerHeight;
@@ -1741,9 +2182,8 @@ export default function App() {
       const scaleH = winH / targetH;
       
       // Use the smaller scale to ensure it fits entirely
-      // But don't scale UP beyond 1 unless full screen
       const newScale = Math.min(scaleW, scaleH);
-      setContainerScale(newScale > 1 ? 1 : newScale);
+      setContainerScale(newScale);
     };
 
     window.addEventListener('resize', handleResize);
@@ -1777,6 +2217,18 @@ export default function App() {
       ref={containerRef}
       className={`h-screen w-screen bg-[#1a1a1a] flex items-center justify-center overflow-hidden transition-all duration-300 ${isFullScreen ? 'p-0' : 'p-2 md:p-4'}`}
     >
+      {/* Cooldown Indicators */}
+      <div className="fixed top-2 right-20 z-[200] flex gap-2 pointer-events-none">
+        {Object.entries(cooldowns).map(([id, time]) => {
+          const remaining = Math.max(0, Math.ceil(((time as number) - Date.now()) / 1000));
+          if (remaining <= 0) return null;
+          return (
+            <div key={id} className="bg-black/60 text-white text-[10px] px-2 py-1 rounded border border-white/20 pixel-text animate-pulse">
+              {id.toUpperCase()}: {remaining}s
+            </div>
+          );
+        })}
+      </div>
       <motion.div 
         initial={{ scale: 0.9, opacity: 0 }}
         animate={{ 
@@ -1803,12 +2255,61 @@ export default function App() {
             <img src="/windows-xp.webp" className="w-[60vw] max-w-[600px] object-contain" alt="Windows XP" onError={(e) => (e.target as any).style.display='none'} />
           </div>
 
-          {lassoState.targetId && otherUsers[lassoState.targetId === 'dummy-id' ? 'dummy-id' : lassoState.targetId] && (
-            <LassoRope 
-              from={denormalize(mousePos)} 
-              to={denormalize(lassoState.targetId === 'dummy-id' ? otherUsers['dummy-id'] : otherUsers[lassoState.targetId])} 
-            />
-          )}
+            {lassoState.targetId && (otherUsers[lassoState.targetId] || (lassoState.targetId === 'dummy-id' && otherUsers['dummy-id'])) && (
+              <LassoRope 
+                from={mousePos} 
+                to={lassoState.targetId === 'dummy-id' ? otherUsers['dummy-id'] : otherUsers[lassoState.targetId]} 
+              />
+            )}
+
+            {/* Lasso Drawing Visual */}
+            {isMouseDown.current && cursorMode === 'lasso' && currentDrawing.length > 1 && (
+               <svg className="absolute inset-0 w-full h-full pointer-events-none z-[1000]" viewBox="0 0 1000 1000" preserveAspectRatio="none">
+                  <path 
+                    d={`M ${currentDrawing.map(p => `${p.x} ${p.y}`).join(' L ')}`}
+                    fill="rgba(217, 119, 6, 0.1)"
+                    stroke="#d97706"
+                    strokeWidth="3"
+                    strokeDasharray="4 4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <circle cx={currentDrawing[0].x} cy={currentDrawing[0].y} r="8" fill="none" stroke="#d97706" />
+               </svg>
+            )}
+
+            {/* Lasso Contraction Visual */}
+            {lassoContraction && (
+              <svg className="absolute inset-0 w-full h-full pointer-events-none z-[1000]" viewBox="0 0 1000 1000" preserveAspectRatio="none">
+                <motion.path 
+                  initial={{ pathLength: 1, scale: 1, opacity: 1 }}
+                  animate={{ scale: 0.1, opacity: 0 }}
+                  transition={{ duration: 0.8, ease: "circIn" }}
+                  style={{ 
+                    originX: `${lassoContraction.center.x}px`, 
+                    originY: `${lassoContraction.center.y}px`,
+                    transformBox: 'fill-box'
+                  }}
+                  d={`M ${lassoContraction.points.map(p => `${p.x} ${p.y}`).join(' L ')} Z`}
+                  fill="rgba(217, 119, 6, 0.3)"
+                  stroke="#d97706"
+                  strokeWidth="6"
+                  strokeLinecap="round"
+                />
+                {/* Ropes from mouse to victims (UI mouse is 0-100, we need 0-1000) */}
+                {lassoContraction.victims.map(vid => {
+                   const v = otherUsers[vid] || (otherUsersRef.current[vid] as any);
+                   if (!v) return null;
+                   return (
+                     <LassoRope 
+                       key={vid}
+                       from={mousePos}
+                       to={{ x: v.x, y: v.y }}
+                     />
+                   );
+                })}
+              </svg>
+            )}
         <AnimatePresence>
           {isBooting ? (
             <motion.div 
@@ -2007,7 +2508,7 @@ export default function App() {
                   stroke={swipe.color || (swipe.attackerId === socketRef.current?.id ? "white" : "#ff3333")}
                   strokeWidth={swipe.color === '#facc15' ? "20" : "12"}
                   strokeLinecap="round"
-                  initial={{ opacity: 1, boxShadow: '0 0 20px white' }}
+                  initial={{ opacity: 1 }}
                   animate={{ opacity: 0, scaleY: 0.5 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.3 }}
@@ -2170,60 +2671,60 @@ export default function App() {
 
         {/* Windows */}
         <AnimatePresence>
-          {windows.map(window => {
+          {windows.map(win => {
             const fightsOpen = windows.find(w => w.id === 'fights-exe')?.isOpen;
             // Privatize windows: only shared during active combat or if specifically Fights.exe is active
-            const isVisible = window.isOpen && (
-              window.openedBy === socketRef.current?.id || 
-              (isGameActive && (window.id === 'fights-exe' || fightsOpen)) || 
-              (window.id === 'fights-exe' && fightsOpen)
+            const isVisible = win.isOpen && (
+              win.openedBy === socketRef.current?.id || 
+              isGameActive ||
+              (win.id === 'fights-exe' && fightsOpen)
             );
             
             if (!isVisible) return null;
 
             return (
               <motion.div
-                key={window.id}
+                key={win.id}
                 initial={{ scale: 0.95, opacity: 0 }}
                 animate={{ 
                   scale: 1, 
                   opacity: 1, 
-                  left: `${((window.x as number) / 1000) * 100}%`, 
-                  top: `${((window.y as number) / 1000) * 100}%`,
-                  width: window.width,
-                  height: window.height
+                  left: `${((win.x as number) / 1000) * 100}%`, 
+                  top: `${((win.y as number) / 1000) * 100}%`,
+                  width: win.width,
+                  height: win.height
                 }}
                 exit={{ scale: 0.95, opacity: 0 }}
-                drag={!window.draggedBy || window.draggedBy === socketRef.current?.id}
+                drag={!win.draggedBy || win.draggedBy === socketRef.current?.id}
                 dragMomentum={false}
                 dragConstraints={desktopRef}
-                onDragStart={(e, info) => handleDragWindowStart(window.id, info)}
-                onDrag={(e, info) => handleDragWindowMove(window.id, info)}
-                onDragEnd={() => handleDragWindowEnd(window.id)}
-                className={`absolute z-20 xp-window xp-pixelated-window overflow-hidden flex flex-col ${window.draggedBy && window.draggedBy !== socketRef.current?.id ? 'opacity-70 pointer-events-none' : ''}`}
+                onDragStart={(e, info) => handleDragWindowStart(win.id, info)}
+                onDrag={(e, info) => handleDragWindowMove(win.id, info)}
+                onDragEnd={() => handleDragWindowEnd(win.id)}
+                className={`absolute z-20 xp-window xp-pixelated-window overflow-hidden flex flex-col ${win.draggedBy && win.draggedBy !== socketRef.current?.id ? 'opacity-70 pointer-events-none' : ''}`}
                 style={{ 
-                  boxShadow: window.draggedBy ? '0 20px 40px rgba(0,0,0,0.4)' : '0 10px 20px rgba(0,0,0,0.2)'
+                  boxShadow: win.draggedBy ? '0 20px 40px rgba(0,0,0,0.4)' : '0 10px 20px rgba(0,0,0,0.2)'
                 }}
               >
                 <div className="xp-window-header cursor-move">
                   <div className="xp-window-title pixel-text text-[9px] uppercase tracking-tighter">
-                    {window.id === 'my-computer' && <Monitor size={14} className="pixel-icon" />}
-                    {window.id === 'server-join' && <Link size={14} className="pixel-icon" />}
-                    {window.id === 'fights-exe' && <Swords size={14} className="pixel-icon" />}
-                    {window.id === 'explorer-exe' && <Folder size={14} className="pixel-icon" />}
-                    {window.id === 'browser-exe' && <Chrome size={14} className="pixel-icon" />}
-                    <span>{window.title} {window.draggedBy && window.draggedBy !== socketRef.current?.id && "(DRAGGED BY OTHER)"}</span>
+                    {win.id === 'my-computer' && <Monitor size={14} className="pixel-icon" />}
+                    {win.id === 'server-join' && <Link size={14} className="pixel-icon" />}
+                    {win.id === 'fights-exe' && <Swords size={14} className="pixel-icon" />}
+                    {win.id === 'explorer-exe' && <Folder size={14} className="pixel-icon" />}
+                    {win.id === 'browser-exe' && <Chrome size={14} className="pixel-icon" />}
+                    <span>{win.title} {win.draggedBy && win.draggedBy !== socketRef.current?.id && "(DRAGGED BY OTHER)"}</span>
                   </div>
                   <div className="xp-window-controls" onPointerDown={(e) => e.stopPropagation()}>
-                    <button onClick={() => toggleWindow(window.id, false)} className="xp-control-button bg-[#3d95ff] border border-white/50 w-5 h-5 flex items-center justify-center"><Minimize2 size={10} /></button>
+                    <button onClick={() => toggleWindow(win.id, false)} className="xp-control-button bg-[#3d95ff] border border-white/50 w-5 h-5 flex items-center justify-center"><Minimize2 size={10} /></button>
                     <button className="xp-control-button bg-[#3d95ff] border border-white/50 w-5 h-5 flex items-center justify-center"><Square size={8} /></button>
                     <button 
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (window.id === 'fights-exe' && isGameActive) return;
-                        toggleWindow(window.id, false);
+                        if (win.id === 'fights-exe' && isGameActive) return;
+                        toggleWindow(win.id, false);
                       }}
-                      className={`xp-control-button ${isGameActive && window.id === 'fights-exe' ? 'bg-gray-500 opacity-50 cursor-not-allowed' : 'bg-[#e91010] active:bg-[#c00]'} border border-white/50 w-5 h-5 flex items-center justify-center`}
+                      className={`xp-control-button ${isGameActive && win.id === 'fights-exe' ? 'bg-gray-500 opacity-50 cursor-not-allowed' : 'bg-[#e91010] active:bg-[#c00]'} border border-white/50 w-5 h-5 flex items-center justify-center`}
                     >
                       <X size={12} strokeWidth={3} />
                     </button>
@@ -2231,7 +2732,7 @@ export default function App() {
                 </div>
                 
                 <div className="flex-1 p-4 bg-white m-0.5 overflow-auto border-t border-gray-400 relative">
-                  {window.id === 'browser-exe' && (
+                  {win.id === 'browser-exe' && (
                     <div className="flex flex-col h-full">
                        <div className="flex items-center gap-2 bg-[#ece9d8] p-1 border-b border-gray-400">
                           <div className="flex gap-1">
@@ -2261,7 +2762,7 @@ export default function App() {
                     </div>
                   )}
 
-                  {window.id === 'explorer-exe' && (
+                  {win.id === 'explorer-exe' && (
                     <div className="flex flex-col h-full bg-[#f1f1f1]">
                       <div className="flex gap-4 p-2 border-b border-white bg-gradient-to-r from-blue-100 to-blue-50">
                         <div className="flex flex-col items-center gap-1 group cursor-pointer" onClick={() => {}}>
@@ -2288,33 +2789,76 @@ export default function App() {
                     </div>
                   )}
 
-                  {window.id === 'shop-exe' ? (
-                    <div className="p-4 bg-gray-100 h-full flex flex-col gap-4 overflow-auto">
-                      <div className="bg-white border-2 border-blue-400 p-3 rounded shadow-inner mb-2">
-                        <p className="font-bold text-blue-800 text-lg">
-                          BALANCE: ${money}
-                        </p>
-                      </div>
-                      <div className="grid grid-cols-1 gap-2">
-                        {shopItems.map(item => (
-                          <div key={item.id} className="flex items-center gap-3 bg-white p-3 border border-gray-300 rounded hover:border-blue-400 transition-colors">
-                            <img src={item.icon} className="w-12 h-12 pixelated object-contain" alt={item.name} />
-                            <div className="flex-1">
-                              <h4 className="font-bold text-sm tracking-tight">{item.name}</h4>
-                              <p className="text-[10px] text-gray-500 leading-tight">{item.desc}</p>
+                  {win.id === 'shop-exe' ? (
+                    <div className="h-full flex flex-col bg-[#ece9d8] text-black border-2 border-[#808080] border-t-[#dfdfdf] border-l-[#dfdfdf]">
+                      <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+                        <div className="flex items-center gap-4 mb-4 pb-4 border-b border-[#808080]">
+                           <div className="w-16 h-16 bg-white border-2 border-[#808080] border-t-[#000] border-l-[#000] flex items-center justify-center">
+                              <Swords className="text-red-600" size={32} />
+                           </div>
+                           <div>
+                              <h3 className="text-xl font-bold text-[#003399] tracking-tighter" style={{ fontFamily: 'Tahoma, sans-serif' }}>SHOP.EXE - MARKET</h3>
+                              <p className="text-xs text-[#003399]/60 font-bold uppercase tracking-widest">Select an attack to license</p>
+                           </div>
+                           <div className="ml-auto text-right">
+                              <p className="text-[10px] font-bold text-gray-500 uppercase">FUNDS</p>
+                              <p className="text-lg font-black text-[#008000] leading-none">${money}</p>
+                           </div>
+                        </div>
+
+                        <div className="flex flex-col gap-3">
+                          {shopItems.map(item => (
+                            <div key={item.id} className="bg-[#f0f0f0] border-2 border-[#ece9d8] border-r-[#808080] border-b-[#808080] p-1">
+                              <div className={`p-2 flex items-center gap-3 transition-colors ${selectedShopItemId === item.id ? 'bg-[#316ac5] text-white' : 'hover:bg-[#dfdfdf]'}`}>
+                                <div className="w-10 h-10 bg-white border border-[#808080] flex items-center justify-center p-1">
+                                  <img src={item.icon} className="w-full h-full pixelated object-contain" alt={item.name} />
+                                </div>
+                                <div className="flex-1 min-w-0" onClick={() => setSelectedShopItemId(selectedShopItemId === item.id ? null : item.id)}>
+                                  <h4 className="font-bold text-xs uppercase truncate leading-tight">{item.name}</h4>
+                                  <p className={`text-[9px] leading-tight line-clamp-1 ${selectedShopItemId === item.id ? 'text-white/80' : 'text-gray-600'}`}>{item.desc}</p>
+                                </div>
+                                <button 
+                                  onClick={() => setSelectedShopItemId(selectedShopItemId === item.id ? null : item.id)}
+                                  disabled={unlockedModes.includes(`${item.id}-personal`) || serverUnlockedItems.includes(`${item.id}-server`)}
+                                  className="xp-button min-w-[70px] h-7 text-[9px] font-bold"
+                                >
+                                  {unlockedModes.includes(`${item.id}-personal`) || serverUnlockedItems.includes(`${item.id}-server`) ? 'OWNED' : 'BUY'}
+                                </button>
+                              </div>
+                              
+                              <AnimatePresence>
+                                {selectedShopItemId === item.id && (
+                                  <motion.div 
+                                    initial={{ height: 0, opacity: 0 }}
+                                    animate={{ height: 'auto', opacity: 1 }}
+                                    exit={{ height: 0 }}
+                                    className="px-2 pt-1 pb-2 overflow-hidden bg-white/30 border-t border-[#808080]/30"
+                                  >
+                                    <div className="flex gap-2">
+                                      <button 
+                                        onClick={() => buyItem(item.id, 'server')}
+                                        disabled={money < item.priceServer}
+                                        className="flex-1 bg-[#dfdfdf] border-2 border-white border-r-[#808080] border-b-[#808080] py-1 text-[9px] font-bold uppercase active:border-[#808080] active:border-r-white active:border-b-white disabled:opacity-50"
+                                      >
+                                        SERVER ($ {item.priceServer})
+                                      </button>
+                                      <button 
+                                        onClick={() => buyItem(item.id, 'personal')}
+                                        disabled={money < item.pricePersonal}
+                                        className="flex-1 bg-[#dfdfdf] border-2 border-white border-r-[#808080] border-b-[#808080] py-1 text-[9px] font-bold uppercase active:border-[#808080] active:border-r-white active:border-b-white disabled:opacity-50"
+                                      >
+                                        PERSONAL ($ {item.pricePersonal})
+                                      </button>
+                                    </div>
+                                  </motion.div>
+                                )}
+                              </AnimatePresence>
                             </div>
-                            <button 
-                              onClick={() => buyItem(item.id, item.price)}
-                              disabled={unlockedModes.includes(item.id) || (currentServerRef.current !== 'training' && money < item.price)}
-                              className={`px-3 py-1 text-xs font-bold rounded ${unlockedModes.includes(item.id) ? 'bg-green-100 text-green-700' : 'bg-green-600 text-white hover:bg-green-500'} disabled:bg-gray-300 disabled:text-gray-500`}
-                            >
-                              {unlockedModes.includes(item.id) ? 'BOUGHT' : `$${item.price}`}
-                            </button>
-                          </div>
-                        ))}
+                          ))}
+                        </div>
                       </div>
                     </div>
-                  ) : window.id === 'my-computer' && (
+                  ) : win.id === 'my-computer' && (
                     <div className="grid grid-cols-4 gap-4 items-start content-start">
                       <div className="flex flex-col items-center gap-1 p-2 hover:bg-blue-100 cursor-pointer rounded border border-transparent hover:border-blue-300">
                         <HardDrive className="text-gray-600" size={40} />
@@ -2327,7 +2871,7 @@ export default function App() {
                     </div>
                   )}
 
-                  {window.id === 'server-join' && (
+                  {win.id === 'server-join' && (
                     <div className="flex flex-col gap-4 p-4 bg-[#ece9d8]">
                       <div className="text-[11px] leading-tight text-gray-700 bg-white/50 p-2 border border-blue-200">
                         <b>XP WORLD PERSISTENCE:</b> Your username is saved to your browser. You can change it below.
@@ -2401,7 +2945,7 @@ export default function App() {
                     </div>
                   )}
 
-                  {window.id === 'fights-exe' && (
+                  {win.id === 'fights-exe' && (
                     <div className="flex flex-col gap-4 h-full">
                       <div className="flex items-center gap-2 border-b-2 border-gray-100 pb-2">
                         <Swords size={24} className="text-red-500" />
@@ -2452,27 +2996,27 @@ export default function App() {
 
                 {/* Resize Handle */}
                 <div 
-                  className="absolute bottom-0 right-0 w-6 h-6 cursor-nwse-resize z-[30] group/resize"
-                  onMouseDown={(e) => {
+                  className="absolute bottom-0 right-0 w-8 h-8 cursor-nwse-resize z-[30] group/resize"
+                  onPointerDown={(e) => {
                     e.stopPropagation();
                     const startX = e.clientX;
                     const startY = e.clientY;
-                    const startWidth = window.width;
-                    const startHeight = window.height;
+                    const startWidth = win.width;
+                    const startHeight = win.height;
 
-                    const onMouseMove = (moveEvent: MouseEvent) => {
+                    const onPointerMove = (moveEvent: PointerEvent) => {
                       const newWidth = Math.max(300, startWidth + (moveEvent.clientX - startX));
                       const newHeight = Math.max(250, startHeight + (moveEvent.clientY - startY));
-                      handleResizeWindow(window.id, newWidth, newHeight);
+                      handleResizeWindow(win.id, newWidth, newHeight);
                     };
 
-                    const onMouseUp = () => {
-                      window.removeEventListener('mousemove', onMouseMove);
-                      window.removeEventListener('mouseup', onMouseUp);
+                    const onPointerUp = () => {
+                      window.removeEventListener('pointermove', onPointerMove as any);
+                      window.removeEventListener('pointerup', onPointerUp as any);
                     };
 
-                    window.addEventListener('mousemove', onMouseMove);
-                    window.addEventListener('mouseup', onMouseUp);
+                    window.addEventListener('pointermove', onPointerMove as any);
+                    window.addEventListener('pointerup', onPointerUp as any);
                   }}
                 >
                   <div className="absolute bottom-1 right-1 w-4 h-4 border-r-2 border-b-2 border-gray-400 group-hover/resize:border-blue-500 transition-colors" />
@@ -2484,6 +3028,8 @@ export default function App() {
         </AnimatePresence>
 
         {/* ... (Taskbar and Start Menu same as before) */}
+        {/* Ability Bar - REMOVED per user request for Wheel */}
+
         <div className="absolute bottom-0 left-0 right-0 h-10 xp-taskbar z-40 flex items-center px-0">
           <button 
             onClick={() => {
@@ -2503,7 +3049,41 @@ export default function App() {
             <span className="text-lg">start</span>
           </button>
 
-          <div className="flex-1 flex px-2 gap-1 overflow-hidden" />
+          <div className="flex-1 flex px-2 gap-1 overflow-hidden">
+            {isMobile && (
+              <div className="flex items-center gap-1">
+                <button 
+                  onClick={() => setIsWheelOpen(true)}
+                  className="h-8 px-2 bg-yellow-500 border-2 border-yellow-700 text-black font-bold text-[10px] uppercase shadow-sm active:translate-y-0.5 transition-transform"
+                >
+                  Abilities
+                </button>
+                <button 
+                  onClick={() => {
+                    const modes = [...unlockedModesRef.current, ...serverUnlockedItemsRef.current].filter(m => !m.includes('bsod') && !m.includes('storm'));
+                    setCursorMode(prev => {
+                      const idx = modes.indexOf(prev);
+                      return modes[(idx + 1) % modes.length];
+                    });
+                  }}
+                  className="h-8 px-2 bg-blue-500 border-2 border-blue-700 text-white font-bold text-[10px] uppercase shadow-sm active:translate-y-0.5 transition-transform"
+                >
+                  Mode
+                </button>
+                {cursorMode === 'pencil' && currentDrawing.length > 2 && (
+                   <button 
+                    onClick={() => {
+                      // @ts-ignore
+                      if (window._finishPencilDrawing) window._finishPencilDrawing();
+                    }}
+                    className="h-8 px-2 bg-green-500 border-2 border-green-700 text-white font-bold text-[10px] uppercase shadow-sm active:translate-y-0.5 animate-pulse"
+                  >
+                    Finish
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
 
           <div className="xp-taskbar bg-[#0996f1] h-full flex items-center px-4 border-l border-[#0877c1] text-white text-xs drop-shadow gap-2">
             <button 
@@ -2527,7 +3107,7 @@ export default function App() {
               initial={{ y: 100, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
               exit={{ y: 100, opacity: 0 }}
-              className="absolute bottom-10 left-0 w-80 h-[450px] bg-white z-30 shadow-2xl rounded-t-lg overflow-hidden border-2 border-[#245edb]"
+              className="absolute bottom-10 left-0 w-full md:w-80 h-[450px] max-h-[70vh] bg-white z-30 shadow-2xl rounded-t-lg overflow-hidden border-2 border-[#245edb]"
             >
               <div className="h-16 bg-gradient-to-b from-[#1941a5] to-[#245edb] p-3 flex items-center gap-3">
                 <div className="w-10 h-10 rounded border-2 border-white bg-blue-300 flex items-center justify-center overflow-hidden">
@@ -2604,13 +3184,104 @@ export default function App() {
           )}
         </AnimatePresence>
 
+        {/* Selection Wheel UI */}
+        <AnimatePresence>
+          {isWheelOpen && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[9999999] flex items-center justify-center bg-black/40 backdrop-blur-[4px]"
+            >
+              <div className="relative w-80 h-80 flex items-center justify-center">
+                {/* Outer Ring */}
+                <div className="absolute inset-0 border-8 border-white/10 rounded-full scale-110" />
+                
+                {/* Center Label */}
+                <div className="text-center z-10 pointer-events-none">
+                  <h3 className="text-white font-black text-2xl tracking-tighter uppercase italic drop-shadow-lg">
+                    {wheelSelection ? wheelSelection : 'SELECT ATTACK'}
+                  </h3>
+                  <p className="text-white/50 text-[10px] font-bold tracking-widest uppercase">Release to Activate</p>
+                </div>
+                
+                {/* Slices */}
+                {[
+                  { id: 'lasso', icon: '/Lasso head.png', angle: -90, color: 'bg-amber-700', label: 'LASSO' },
+                  { id: 'bsod', icon: '/BSOD.png', angle: 30, color: 'bg-blue-600', label: 'GLOBAL BSOD' },
+                  { id: 'storm', icon: 'https://img.icons8.com/color/96/commercial.png', angle: 150, color: 'bg-yellow-500', label: 'AD STORM' }
+                ].map((item, i) => {
+                  const rad = (item.angle * Math.PI) / 180;
+                  const dist = 120;
+                  const x = Math.cos(rad) * dist;
+                  const y = Math.sin(rad) * dist;
+                  
+                  const isBought = unlockedModes.includes(`${item.id}-personal`) || serverUnlockedItems.includes(`${item.id}-server`);
+                  const onCooldown = cooldowns[item.id] && Date.now() < cooldowns[item.id];
+                  const isSelected = wheelSelection === item.id;
+                  
+                  return (
+                    <motion.div
+                      key={item.id}
+                      initial={{ scale: 0, opacity: 0, x: 0, y: 0 }}
+                      animate={{ scale: 1, opacity: 1, x, y }}
+                      transition={{ type: 'spring', damping: 20, stiffness: 300, delay: i * 0.05 }}
+                      onMouseEnter={() => !isMobile && isBought && !onCooldown && setWheelSelection(item.id)}
+                      onClick={() => {
+                        if (!isBought || onCooldown) return;
+                        if (isMobile) {
+                           setWheelSelection(item.id);
+                           const now = Date.now();
+                           if (item.id === 'lasso') {
+                             setCursorMode('lasso');
+                           } else if (item.id === 'bsod') {
+                             if (!cooldownsRef.current['bsod'] || now >= cooldownsRef.current['bsod']) {
+                               socketRef.current?.emit('bsod-trigger');
+                               setCooldowns(prev => ({ ...prev, bsod: now + 45000 }));
+                             }
+                           } else if (item.id === 'storm') {
+                             if (!cooldownsRef.current['storm'] || now >= cooldownsRef.current['storm']) {
+                               socketRef.current?.emit('storm-trigger');
+                               setCooldowns(prev => ({ ...prev, storm: now + 30000 }));
+                             }
+                           }
+                           setIsWheelOpen(false);
+                           setWheelSelection(null);
+                        }
+                      }}
+                      className={`absolute w-24 h-24 rounded-full flex flex-col items-center justify-center border-4 transition-all overflow-hidden
+                        ${isSelected ? 'scale-125 border-white shadow-[0_0_30px_rgba(255,255,255,0.5)] z-20' : 'scale-100 border-white/20'}
+                        ${!isBought ? 'bg-gray-800/80 grayscale' : onCooldown ? 'bg-black/90' : item.color}
+                      `}
+                    >
+                      <img src={item.icon} className={`w-12 h-12 object-contain ${onCooldown ? 'opacity-30' : ''}`} alt={item.id} />
+                      {!isBought ? (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/60">
+                           <Lock className="text-white" size={24} />
+                        </div>
+                      ) : onCooldown ? (
+                        <div className="absolute inset-0 flex items-center justify-center flex-col">
+                           <span className="text-white font-black text-lg">
+                             {Math.ceil((cooldowns[item.id] - Date.now())/1000)}s
+                           </span>
+                           <span className="text-[8px] text-white/50 font-bold">READY IN</span>
+                        </div>
+                      ) : null}
+                    </motion.div>
+                  );
+                })}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
       {/* Custom Cursor Artifact (Global - Local) */}
         <div 
           className="custom-cursor pointer-events-none"
           style={{ 
             left: `${uiMousePos.x}%`,
             top: `${uiMousePos.y}%`,
-            zIndex: 10000,
+            zIndex: 9999999,
             transform: 'translate(-2px, -2px)'
           }}
         >
@@ -2641,6 +3312,23 @@ export default function App() {
               <div 
                 className={`h-full transition-all duration-100 ${stamina < 25 ? 'bg-red-500' : 'bg-blue-400'}`}
                 style={{ width: `${stamina}%` }}
+              />
+            </motion.div>
+          )}
+
+          {/* Floating Ink Bar for Pencil/Lasso */}
+          {currentDrawing.length > 0 && (cursorMode === 'pencil' || cursorMode === 'lasso') && (
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.8 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute left-1/2 -top-4 -translate-x-1/2 w-10 h-1.5 bg-black/60 border border-white/40 rounded-full overflow-hidden"
+            >
+              <div 
+                className={`h-full transition-all duration-75 ${
+                  currentDrawing.length > (cursorMode === 'pencil' ? 120 : 80) ? 'bg-red-500 animate-pulse' : 'bg-white'
+                }`}
+                style={{ width: `${(currentDrawing.length / (cursorMode === 'pencil' ? 150 : 100)) * 100}%` }}
               />
             </motion.div>
           )}
@@ -2684,6 +3372,8 @@ export default function App() {
                         src={
                           cursorMode === 'pencil' ? '/Pen_mouse.png' :
                           cursorMode === 'eraser' ? '/recycle-bin.png' :
+                          cursorMode.includes('bsod') ? '/BSOD.png' :
+                          cursorMode.includes('storm') ? 'https://img.icons8.com/color/96/commercial.png' :
                           cursorMode === 'hammer' ? 'https://img.icons8.com/pixel-serif/64/null/hammer.png' :
                           cursorMode === 'spray' ? 'https://img.icons8.com/pixel-serif/64/null/paint-spray.png' :
                           cursorMode === 'bucket' ? 'https://img.icons8.com/pixel-serif/64/null/paint-bucket.png' :
@@ -2721,6 +3411,137 @@ export default function App() {
             </div>
           )}
         </div>
+
+        {/* Ability Hotbar HUD */}
+        <div className="absolute bottom-16 left-1/2 -translate-x-1/2 flex items-center gap-3 z-[150] pointer-events-none">
+          {shopItems.map((item) => {
+            const isBought = unlockedModes.some(m => m.includes(item.id)) || serverUnlockedItems.some(m => m.includes(item.id));
+            const onCooldown = cooldowns[item.id] && Date.now() < cooldowns[item.id];
+            const isActive = cursorMode === item.id;
+            
+            if (!isBought) return null;
+
+            return (
+              <motion.div
+                key={item.id}
+                initial={{ y: 20, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.9 }}
+                className={`relative w-12 h-12 bg-[#ccc] border-[2px] border-t-white border-l-white border-b-gray-800 border-r-gray-800 flex items-center justify-center shadow-lg pointer-events-auto cursor-pointer group
+                  ${isActive ? 'ring-2 ring-blue-500 scale-110 shadow-blue-500/50' : ''}
+                  ${onCooldown ? 'opacity-70 grayscale' : ''}
+                `}
+                onClick={() => {
+                   if (onCooldown) return;
+                   if (item.id === 'lasso') setCursorMode('lasso');
+                   if (item.id === 'bsod') {
+                      const now = Date.now();
+                      if (!cooldowns['bsod'] || now >= cooldowns['bsod']) {
+                        socketRef.current?.emit('bsod-trigger');
+                        setCooldowns(prev => ({ ...prev, bsod: now + 45000 }));
+                      }
+                   }
+                   if (item.id === 'storm') {
+                      const now = Date.now();
+                      if (!cooldowns['storm'] || now >= cooldowns['storm']) {
+                        socketRef.current?.emit('storm-trigger');
+                        setCooldowns(prev => ({ ...prev, storm: now + 30000 }));
+                      }
+                   }
+                }}
+              >
+                <img src={item.icon} className={`w-8 h-8 object-contain pixelated ${onCooldown ? 'opacity-40' : ''}`} alt={item.id} />
+                
+                {onCooldown && (
+                  <>
+                    <motion.div 
+                      initial={{ height: "100%" }}
+                      animate={{ height: "0%" }}
+                      transition={{ duration: (cooldowns[item.id] - Date.now()) / 1000, ease: "linear" }}
+                      className="absolute bottom-0 left-0 w-full bg-black/40"
+                    />
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <span className="text-white text-[10px] font-bold font-mono drop-shadow-md">
+                        {Math.ceil((cooldowns[item.id] - Date.now()) / 1000)}
+                      </span>
+                    </div>
+                  </>
+                )}
+
+                {/* Mode Label */}
+                <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-black/80 text-white text-[7px] px-1.5 py-0.5 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity border border-white/20 z-[200]">
+                   {item.name}
+                </div>
+              </motion.div>
+            );
+          })}
+        </div>
+
+        {/* Ad Storm Popups */}
+        <AnimatePresence>
+          {adPopups.map((popup) => (
+            <motion.div
+              key={popup.id}
+              initial={{ scale: 0, x: `${popup.x}%`, y: `${popup.y}%` }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0, opacity: 0 }}
+              drag
+              className="fixed z-[9999] w-64 bg-[#ece9d8] border-2 border-[#808080] border-t-white border-l-white shadow-xl flex flex-col"
+              style={{ left: `${popup.x}%`, top: `${popup.y}%` }}
+            >
+              <div className="bg-gradient-to-r from-[#000080] to-[#1084d0] p-1 flex justify-between items-center px-2">
+                <span className="text-white text-[10px] font-bold truncate pr-2">{popup.content}</span>
+                <button 
+                  onClick={() => setAdPopups(prev => prev.filter(p => p.id !== popup.id))}
+                  className="bg-[#c0c0c0] border border-white hover:bg-red-500 hover:text-white w-4 h-4 flex items-center justify-center text-[10px] font-bold"
+                >×</button>
+              </div>
+              <div className="p-4 bg-white flex flex-col items-center gap-3 min-h-[100px] justify-center text-center">
+                <AlertTriangle className="text-yellow-500" size={24} />
+                <p className="text-[11px] font-bold leading-tight">{popup.content}</p>
+                <button 
+                  onClick={() => setAdPopups(prev => prev.filter(p => p.id !== popup.id))}
+                  className="bg-[#ece9d8] border-2 border-gray-800 border-t-white border-l-white px-4 py-1 text-[10px] font-bold active:border-t-gray-800 active:border-l-gray-800 active:bg-gray-300"
+                >OK</button>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+
+        {/* BSOD Overlay */}
+        <AnimatePresence>
+          {isBSODActive && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ 
+                  opacity: 1,
+                  x: bsodGlitched ? [0, -5, 5, -2, 0] : 0,
+                  y: bsodGlitched ? [0, 2, -2, 1, 0] : 0,
+                  filter: bsodGlitched ? ["brightness(1)", "brightness(2)", "contrast(3)"] : "brightness(1)",
+                  scale: bsodGlitched ? [1, 1.02, 0.98, 1] : 1
+              }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[10000] bg-[#000080] flex flex-col items-center justify-center p-8 overflow-hidden select-none"
+            >
+              {/* BSOD Content */}
+              <div className="text-white font-mono text-sm max-w-2xl text-left flex flex-col gap-4">
+                <div className="bg-white text-[#000080] inline-block px-2 font-bold mb-4">Windows</div>
+                <p className="text-xl font-bold mb-4">A problem has been detected and Windows has been shut down to prevent damage to your computer.</p>
+                <p>DRIVER_IRQL_NOT_LESS_OR_EQUAL</p>
+                <p>If this is the first time you've seen this stop error screen, restart your computer. If this screen appears again, follow these steps:</p>
+                <p>Check to make sure any new hardware or software is properly installed. If this is a new installation, ask your hardware or software manufacturer for any Windows updates you might need.</p>
+                <p>*** STOP: 0x000000D1 (0x00000000, 0x00000002, 0x00000000, 0xF73120AE)</p>
+                <p className="mt-4">Beginning dump of physical memory.</p>
+                <p>Physical memory dump complete.</p>
+                <p>Contact your system administrator or technical support group for further assistance.</p>
+              </div>
+              <div className="absolute inset-0 pointer-events-none opacity-10 bg-white/5 animate-pulse mix-blend-overlay" />
+              {/* Optional image overlay if provided by user */}
+              <img src="/BSOD.png" className="absolute inset-0 w-full h-full object-cover opacity-30 pointer-events-none mix-blend-overlay" alt="" />
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Other Users' Cursors */}
         {Object.entries(otherUsers).map(([id, user]) => {

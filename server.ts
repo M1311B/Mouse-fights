@@ -14,7 +14,12 @@ async function startServer() {
   const io = new Server(httpServer, {
     cors: {
       origin: "*",
+      methods: ["GET", "POST"]
     },
+    pingTimeout: 60000,
+    pingInterval: 25000,
+    allowEIO3: true, // Support older clients if any
+    connectTimeout: 45000
   });
 
   const PORT = 3000;
@@ -215,7 +220,7 @@ async function startServer() {
       io.to(currentRoom).emit("user-ready-changed", { id: socket.id, isReady });
     });
 
-    socket.on("damage-player", ({ targetId, damage, effects }) => {
+    socket.on("damage-player", ({ targetId, damage, effects, duration }: { targetId: string, damage: number, effects?: string[], duration?: number }) => {
       if (!currentRoom || !rooms[currentRoom] || !rooms[currentRoom].users[targetId]) return;
       const room = rooms[currentRoom];
       room.users[targetId].health = Math.max(0, room.users[targetId].health - damage);
@@ -223,7 +228,7 @@ async function startServer() {
 
       if (effects && effects.length > 0) {
         effects.forEach((effect: string) => {
-           io.to(currentRoom!).emit("user-effect", { userId: targetId, effect, duration: 3000 });
+           io.to(currentRoom!).emit("user-effect", { userId: targetId, effect, duration: duration || 3000 });
         });
       }
 
@@ -245,6 +250,21 @@ async function startServer() {
     socket.on("swipe-attack", ({ from, to }) => {
       if (!currentRoom) return;
       socket.to(currentRoom).emit("visual-swipe", { attackerId: socket.id, from, to });
+    });
+
+    socket.on("bsod-trigger", () => {
+      if (!currentRoom || !rooms[currentRoom]) return;
+      io.to(currentRoom).emit("bsod-start", { triggererId: socket.id });
+    });
+
+    socket.on("storm-trigger", () => {
+      if (!currentRoom || !rooms[currentRoom]) return;
+      io.to(currentRoom).emit("storm-start", { triggererId: socket.id });
+    });
+
+    socket.on("buy-server-item", ({ itemId }) => {
+      if (!currentRoom || !rooms[currentRoom]) return;
+      io.to(currentRoom).emit("server-item-unlocked", { itemId });
     });
 
     socket.on("reset-game", () => {
