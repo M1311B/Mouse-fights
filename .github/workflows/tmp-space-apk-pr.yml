@@ -1,0 +1,109 @@
+name: Temporary Space Salvage APK Build
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROJECT_ZIP_URL: "https://sdmntprdenmarkeast.oaiusercontent.com/files/00000000-6394-8210-9535-cebc07d4857c/raw?se=2026-10-04T22%3A38%3A51Z&sp=r&sv=2026-02-06&sr=b&scid=d1c245e5-b6ac-5aa6-8fc3-e7c194d93335&skoid=6658dbdd-f305-4d30-8f6b-d62218202cb9&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-10-04T18%3A12%3A39Z&ske=2026-10-05T18%3A12%3A39Z&sks=b&skv=2026-02-06&sig=unHwjBRzaGC3vMNRa/LhimV7ZrE0YNQubqongAD%2B1Sw%3D"
+      GODOT_VERSION: "4.6.3"
+
+    steps:
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "build-tools;35.0.1" "platforms;android-35"
+
+      - name: Download project
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/project"
+          curl -fL --retry 4 --retry-delay 2 "$PROJECT_ZIP_URL" -o "$RUNNER_TEMP/project.zip"
+          unzip -q "$RUNNER_TEMP/project.zip" -d "$RUNNER_TEMP/project"
+          test -f "$RUNNER_TEMP/project/project.godot"
+
+      - name: Set Android app identity
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PROJECT="$RUNNER_TEMP/project"
+          sed -i 's|config/name="New Game Project"|config/name="Space Salvage Adventures"|' "$PROJECT/project.godot"
+          sed -i 's|package/unique_name="[^"]*"|package/unique_name="com.habibistudios.spacesalvageadventures"|' "$PROJECT/export_presets.cfg"
+          sed -i 's|package/name=""|package/name="Space Salvage Adventures"|' "$PROJECT/export_presets.cfg"
+          sed -i 's|package/show_as_launcher_app=false|package/show_as_launcher_app=true|' "$PROJECT/export_presets.cfg"
+          grep -nE 'config/name|package/unique_name|package/name|package/show_as_launcher_app' "$PROJECT/project.godot" "$PROJECT/export_presets.cfg"
+
+      - name: Install Godot and export templates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fL --retry 4 "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" -o godot.zip
+          unzip -q godot.zip
+          chmod +x "Godot_v${GODOT_VERSION}-stable_linux.x86_64"
+          sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+
+          curl -fL --retry 4 "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -o templates.tpz
+          rm -rf "$RUNNER_TEMP/templates"
+          mkdir -p "$RUNNER_TEMP/templates"
+          unzip -q templates.tpz -d "$RUNNER_TEMP/templates"
+          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          cp -a "$RUNNER_TEMP/templates/templates/." "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/"
+          godot --version
+
+      - name: Configure Android export
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/.android" "$HOME/.config/godot"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          cat > "$HOME/.config/godot/editor_settings-4.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          EOF
+
+      - name: Import project
+        shell: bash
+        run: |
+          set -euxo pipefail
+          godot --headless --editor --path "$RUNNER_TEMP/project" --quit-after 5
+
+      - name: Export official Android APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          godot --headless --path "$RUNNER_TEMP/project" --export-debug "Android" "$GITHUB_WORKSPACE/out/Space-Salvage-Adventures.apk"
+          test -s "$GITHUB_WORKSPACE/out/Space-Salvage-Adventures.apk"
+          ls -lh "$GITHUB_WORKSPACE/out/Space-Salvage-Adventures.apk"
+          unzip -t "$GITHUB_WORKSPACE/out/Space-Salvage-Adventures.apk" >/dev/null
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Space-Salvage-Adventures-Official-APK
+          path: out/Space-Salvage-Adventures.apk
+          if-no-files-found: error
+          retention-days: 1
