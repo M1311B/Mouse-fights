@@ -1,0 +1,88 @@
+name: Temporary Space APK Build
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROJECT_ZIP_URL: "https://sdmntprnortheu.oaiusercontent.com/files/00000000-73d8-81f4-8482-486d5ac68c75/raw?se=2026-10-04T21%3A49%3A46Z&sp=r&sv=2026-02-06&sr=b&scid=83f8ec3c-2339-5647-bf6e-ceaf4a62cf42&skoid=6658dbdd-f305-4d30-8f6b-d62218202cb9&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-10-04T10%3A10%3A55Z&ske=2026-10-05T10%3A10%3A55Z&sks=b&skv=2026-02-06&sig=cQWuMkFL/QcUMOjuDZu/NiY2i2e%2B82GvvdVryca7azQ%3D"
+
+    steps:
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages required by Godot 4.6
+        shell: bash
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "build-tools;35.0.1" "platforms;android-35"
+
+      - name: Download uploaded Godot project
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/godot_project"
+          curl -fL --retry 4 --retry-delay 2 "$PROJECT_ZIP_URL" -o /tmp/space-project.zip
+          test "$(stat -c%s /tmp/space-project.zip)" -gt 1000000
+          unzip -q /tmp/space-project.zip -d "$GITHUB_WORKSPACE/godot_project"
+          test -f "$GITHUB_WORKSPACE/godot_project/project.godot"
+          ls -lah "$GITHUB_WORKSPACE/godot_project" | head
+
+      - name: Set up Godot 4.6.3 with export templates
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.6.3
+          use-dotnet: false
+          include-templates: true
+
+      - name: Configure Godot Android paths
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/.config/godot"
+          cat > "$HOME/.config/godot/editor_settings-4.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          EOF
+          cat "$HOME/.config/godot/editor_settings-4.tres"
+          godot --version
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "JAVA_HOME=$JAVA_HOME"
+
+      - name: Import project once
+        shell: bash
+        run: |
+          set -euxo pipefail
+          timeout 180 godot --headless --editor --path "$GITHUB_WORKSPACE/godot_project" --quit-after 8 || true
+
+      - name: Export Android debug APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          godot --headless --path "$GITHUB_WORKSPACE/godot_project" --export-debug "Android" "$GITHUB_WORKSPACE/out/SpaceSalvage.apk"
+          test -s "$GITHUB_WORKSPACE/out/SpaceSalvage.apk"
+          ls -lh "$GITHUB_WORKSPACE/out/SpaceSalvage.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpaceSalvage-APK
+          path: out/SpaceSalvage.apk
+          if-no-files-found: error
+          retention-days: 1
